@@ -32,16 +32,18 @@ enum StateIndex : int {
     R = 0,                   // (3 dimention) rotation in world frame
     P = 3,                   // (3 dimention) position in world frame
     V = 6,                   // (3 dimention) velocity in world frame
-    BW = 9,                 // (3 dimention) IMU gyroscope bias
-    BA = 12,                 // (3 dimention) IMU acceleration bias
-    G = 15,                 // (3 dimention) Gravity in world frame
+    OMG = 9,                 // (3 dimension) body angular rate (output-state IMU model)
+    ACC = 12,                // (3 dimension) body specific force (output-state IMU model)
+    BW = 15,                 // (3 dimension) IMU gyroscope bias
+    BA = 18,                 // (3 dimension) IMU acceleration bias
+    G = 21,                  // (3 dimension) Gravity in world frame
     // Elevator 1D substate (world gravity axis)  (scalars)
-    Z  = 18,  // z position (1)
-    VZ = 19,  // z velocity (1)
-    AZ = 20,  // z acceleration (1)
+    Z  = 24,  // z position (1)
+    VZ = 25,  // z velocity (1)
+    AZ = 26,  // z acceleration (1)
 
     // ---- Total state dimension ----
-    STATE_TOTAL = 21
+    STATE_TOTAL = 27
 };
 
 enum StateNoiseIndex : int {
@@ -62,6 +64,11 @@ struct State {
     Eigen::Quaterniond q;  // w_q_imu
     Eigen::Vector3d p; // w_p_imu
     Eigen::Vector3d v; // w_v_imu
+    // Point-LIO-style output-state variables. The storage remains present so
+    // the error-state layout is fixed, but these variables are coupled into
+    // propagation only inside an over-range IMU replay.
+    Eigen::Vector3d omg = Eigen::Vector3d::Zero(); // body angular rate [rad/s]
+    Eigen::Vector3d acc = Eigen::Vector3d::Zero(); // body specific force [m/s^2]
     Eigen::Vector3d bw;
     Eigen::Vector3d ba;
     Eigen::Vector3d g; // world

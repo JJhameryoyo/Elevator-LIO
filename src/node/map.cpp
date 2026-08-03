@@ -207,6 +207,11 @@ void LIONode::map_incremental(PointCloudXYZI & lidar_clouds) {
 void init_ikd_map() {
     IkdMap<PointType>::Config map_config;
     map_config.local_map_cube_len = local_map_cube_len;
+    map_config.backend = map_type;
+    map_config.ivox_grid_resolution = ivox_grid_resolution;
+    map_config.ivox_nearby_type = ivox_nearby_type;
+    map_config.ivox_max_search_range = ivox_max_search_range;
+    map_config.ivox_insert_voxel_size = ivox_insert_voxel_size;
     ikd_map = std::make_shared<IkdMap<PointType>>(map_config, &ikdtree);
     ikd_map->init(min_filter_size > 0.0 ? min_filter_size : filter_size);
 }

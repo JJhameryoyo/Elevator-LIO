@@ -65,5 +65,5 @@ log:
       file_prefix: "debug/ikdtree_cloud" # 输出文件前缀，程序会追加时间戳和 .pcd
 
 visualize:
-  CovMatrix_vis: false # 使用 OpenCV 窗口实时显示 21×21 状态协方差；明显消耗 CPU/GPU
+  CovMatrix_vis: false # 使用 OpenCV 窗口实时显示 27×27 状态协方差；明显消耗 CPU/GPU
   EleState_vis: false # 使用 OpenCV 窗口显示电梯状态历史曲线；明显消耗 CPU/GPU

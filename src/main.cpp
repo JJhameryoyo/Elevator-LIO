@@ -162,10 +162,10 @@ void LIONode::timer_500HZ_callback() {
 
     if (result.processed) {
         const auto& post_state = result.post_state;
-        publish_imu_odometry(post_state);
-        publish_body_odometry(post_state);
+        publish_imu_odometry(post_state, post_state.time);
+        publish_body_odometry(post_state, post_state.time);
         if (trajectory_log_enable & log_save_enable) {
-            save_odometry(post_state, lidar_end_time);
+            save_odometry(post_state, post_state.time);
         }
         publish_Dedistort_clouds_lidar(result.dedistorted_cloud);
         publish_Effect_clouds_lidar(down_effect_cloud_lidar);
@@ -231,8 +231,12 @@ void LIONode::timer_2000HZ_callback()
                 }
                 State state;
                 imu_process.get_state_at_t(state, lastest_imu_time);
+                IMUProcess::ProcessedImuSample processed_imu;
+                const bool have_processed_imu = imu_process.getLatestProcessedSample(processed_imu);
                 Eigen::Vector3d raw_acc = {msg->linear_acceleration.x , msg->linear_acceleration.y , msg->linear_acceleration.z};
-                Eigen::Vector3d acc_b = G_SCALE_UP ? raw_acc * G_m_s2 : raw_acc;
+                Eigen::Vector3d acc_b = have_processed_imu
+                                      ? processed_imu.acc
+                                      : (G_SCALE_UP ? raw_acc * G_m_s2 : raw_acc);
                 Eigen::Vector3d acc_w = state.q * (acc_b - state.ba) + state.g;
 
                 ElevatorSelfExit::ImuFrame frame;
@@ -241,7 +245,15 @@ void LIONode::timer_2000HZ_callback()
                 frame.vel_z = state.vz;
                 frame.in_elevator = state.in_elevator;
 
-                auto ele_result = ele_self_exit.process(frame, state);
+                ElevatorSelfExit::ProcessResult ele_result;
+                // 有限的超量程值仍是当前实验的有效量测；只有 NaN/Inf 轴
+                // （mask 高三位）不参与停靠状态机。
+                constexpr std::uint8_t kInvalidAxisMask = 0x38u;
+                const bool acceleration_is_trusted = !have_processed_imu ||
+                        (processed_imu.acc_saturation_mask & kInvalidAxisMask) == 0;
+                if (acceleration_is_trusted) {
+                    ele_result = ele_self_exit.process(frame, state);
+                }
 
                 if (ele_result.apply_waiting_zupt) {
                     imu_process.elev_process.applyZeroVelocityUpdateZ(state);
@@ -316,8 +328,6 @@ void LIONode::timer_2000HZ_callback()
 
 // 按下ctrl c后的处理函数
 namespace {
-volatile std::sig_atomic_t g_shutdown_signal = 0;
-
 bool isSafeRelativeConfigPath(const std::filesystem::path &path) {
     if (path.empty() || path.is_absolute()) return false;
     for (const auto &component : path) {
@@ -369,11 +379,13 @@ void archiveActiveYamlConfigs(const std::string &package_share,
 }
 }
 
+#if LIO_ROS_VERSION == 1
 void SigHandle(int sig)
 {
-    g_shutdown_signal = sig;
+    (void)sig;
     lio_ros::shutdown();
 }
+#endif
 
 /******************************** [M7] Program entry and shutdown persistence ********************************/
 
@@ -385,12 +397,15 @@ int main(int argc, char** argv)
 {
     // 初始化 ROS 节点
 #if LIO_ROS_VERSION == 1
-    lio_ros::init(argc, argv, "lio_node");
-#else
+    // ROS1 延续自定义处理器：回调只触发 ros::shutdown()，spin 返回后统一落盘。
     lio_ros::init(argc, argv, "lio_node", false);
+    signal(SIGINT, SigHandle);
+    signal(SIGTERM, SigHandle);
+#else
+    // ROS2 的 shutdown 涉及锁，不能从异步 POSIX signal handler 中直接调用。
+    // 使用 rclcpp 自带的信号处理线程，spin 返回后仍会执行下方统一落盘逻辑。
+    lio_ros::init(argc, argv, "lio_node", true);
 #endif
-    signal(SIGINT, SigHandle); // 关联SIGINT信号（通常是ctrl c）与自定义函数句柄 SigHandle
-    signal(SIGTERM, SigHandle); // 关联SIGTERM信号（通常是ctrl c）与自定义函数句柄 SigHandle
 
     // 初始化
     auto ros_node = std::make_shared<lio_ros::Node>("lio_node");

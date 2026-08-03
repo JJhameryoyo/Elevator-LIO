@@ -18,6 +18,9 @@ public:
                    int k_nearest,
                    PointVector &nearest_points,
                    std::vector<float> &distance_sq) const {
+        if (ikd_map) {
+            return ikd_map->searchKnn(query_point_world, k_nearest, nearest_points, distance_sq);
+        }
         ikdtree.Nearest_Search(query_point_world, k_nearest, nearest_points, distance_sq);
         return nearest_points.size() >= static_cast<size_t>(k_nearest);
     }

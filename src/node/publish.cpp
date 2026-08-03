@@ -207,13 +207,23 @@ void LIONode::publishGlobalMap() {
         }
         /********* 如果需要不发布全局地图，先存储在文件中，最后再合并 *********/
         else{
-            // 构造文件名，准备先记录到文件中
-            std::stringstream ss;
-            ss << PACKAGE_ROOT_DIR << "/PCD/Temp/incremental_cloud_" << frame_idx++ << ".pcd";
-            // 保存本帧
-            pcl::io::savePCDFileBinary(ss.str(), *effect_down_cloud_world);
-            // 路径保存起来
-            incremental_paths.push_back(ss.str());
+            // 每次运行写入自己的日志会话目录，避免多个进程或历史 root
+            // 文件复用 incremental_cloud_0.pcd 时触发 PCL IOException。
+            const std::filesystem::path incremental_dir =
+                    std::filesystem::path(current_tempdir_log) / "map" / "incremental";
+            std::filesystem::create_directories(incremental_dir);
+            const std::filesystem::path cloud_path =
+                    incremental_dir / ("incremental_cloud_" + std::to_string(frame_idx++) + ".pcd");
+            try {
+                if (pcl::io::savePCDFileBinary(cloud_path.string(), *effect_down_cloud_world) == 0) {
+                    incremental_paths.push_back(cloud_path.string());
+                } else {
+                    LOG_ERROR(Map, "failed to save incremental cloud: " << cloud_path.string());
+                }
+            } catch (const pcl::IOException &e) {
+                LOG_ERROR(Map, "failed to save incremental cloud: " << cloud_path.string()
+                               << ", error=" << e.what());
+            }
         }
         // 计算程序耗时
         auto end = std::chrono::system_clock::now();

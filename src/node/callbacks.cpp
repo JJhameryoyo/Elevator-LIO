@@ -18,7 +18,10 @@ extern std::shared_ptr<TopicProcess> p_topic_process;
  * @param msg 点云数据
  */
 void pcl_cbk_custom(const lio_ros::CustomMsgConstPtr& msg) {
-    if (FSM::current_state == FSM::State::Initializing || FSM::current_state == FSM::State::Waitting) return;
+    // Keep early LiDAR frames before and during IMU initialization. The pipeline
+    // later discards only frames outside the initialized IMU time range, so
+    // the first map frame is selected by sensor timestamps rather than callback
+    // scheduling or rosbag playback rate.
     p_topic_process->receive_points(msg);
 }
 
@@ -27,7 +30,6 @@ void pcl_cbk_custom(const lio_ros::CustomMsgConstPtr& msg) {
  * @param msg 点云数据
  */
 void pcl_cbk_pc2(const lio_ros::PointCloud2ConstPtr &msg)  {
-    if (FSM::current_state == FSM::State::Initializing || FSM::current_state == FSM::State::Waitting) return;
     switch (lidar_type) {
         case LidarType::Livox:
             break;

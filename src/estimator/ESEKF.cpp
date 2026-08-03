@@ -72,6 +72,11 @@ namespace {
         return mode.empty() || mode == "fastlio_score" || mode == "fastlio";
     }
 
+    bool usePointLioGate() {
+        const std::string mode = normalizeLowerCopy(ikdtree_gate_mode);
+        return mode == "pointlio" || mode == "point_lio";
+    }
+
     /**
      * @brief 从完整的状态误差向量中提取位姿相关的误差（旋转+平移）
      * @param error_s 完整的误差状态向量（含旋转、平移、速度、Bias等）
@@ -257,7 +262,7 @@ void recordAndMaybeReportLidarPerf(const LidarPerfSnapshot &snap) {
     const double solve_ratio = update_total.avgMs() > 1e-9 ? (100.0 * solve_total.avgMs() / update_total.avgMs()) : 0.0;
 
     LOG_INFO(Perf,
-             "[lidar_perf][" << (snap.pose6 ? "pose6" : "full21") << "] "
+             "[lidar_perf][" << (snap.pose6 ? "pose6" : "full27") << "] "
              << "frames=" << report_count
              << " win_avg_total_ms=" << std::fixed << std::setprecision(3) << update_total.avgMs()
              << " win_max_total_ms=" << update_total.maxWindowMs()
@@ -331,12 +336,16 @@ EskfEstimator::EskfEstimator() {
     state_.q = Eigen::Quaterniond(1, 0, 0, 0);
     state_.p = Eigen::Vector3d(0, 0, 0);
     state_.v = Eigen::Vector3d(0, 0, 0);
+    state_.omg = Eigen::Vector3d(0, 0, 0);
+    state_.acc = Eigen::Vector3d(0, 0, G_m_s2);
     state_.bw = Eigen::Vector3d(0, 0, 0);
     state_.ba = Eigen::Vector3d(0, 0, 0);
     state_.g = Eigen::Vector3d(0, 0, -G_m_s2);
     state_.P = Eigen::Matrix<double, StateIndex::STATE_TOTAL, StateIndex::STATE_TOTAL>::Identity();
     state_.P.block<3,3>(StateIndex::P, StateIndex::P) = Eigen::Matrix3d::Identity() * 0.01;
     state_.P.block<3,3>(StateIndex::V, StateIndex::V) = Eigen::Matrix3d::Identity() * 0.01;
+    state_.P.block<3,3>(StateIndex::OMG, StateIndex::OMG) = Eigen::Matrix3d::Identity() * 0.01;
+    state_.P.block<3,3>(StateIndex::ACC, StateIndex::ACC) = Eigen::Matrix3d::Identity() * 0.01;
     state_.time = 0;
     mean_acc_ = Eigen::Vector3d(0, 0, 0);
     mean_gyr_ = Eigen::Vector3d(0, 0, 0);
@@ -366,6 +375,9 @@ std::vector<std::string> createStateLabels() {
     labels.push_back("dp_x"); labels.push_back("dp_y"); labels.push_back("dp_z");
     // v
     labels.push_back("dv_x"); labels.push_back("dv_y"); labels.push_back("dv_z");
+    // output-state angular rate and specific force
+    labels.push_back("domg_x"); labels.push_back("domg_y"); labels.push_back("domg_z");
+    labels.push_back("dacc_x"); labels.push_back("dacc_y"); labels.push_back("dacc_z");
     // bw
     labels.push_back("dbw_x"); labels.push_back("dbw_y"); labels.push_back("dbw_z");
     // ba
@@ -636,6 +648,8 @@ void EskfEstimator::UpdateByLidarIESKF(PointCloudXYZI &Dedistort_clouds_lidar) {
             s_next.q.normalize();
             s_next.p  = s_next.p  + update_x.block<3,1>(StateIndex::P,0);
             s_next.v  = s_next.v  + update_x.block<3,1>(StateIndex::V,0);
+            s_next.omg = s_next.omg + update_x.block<3,1>(StateIndex::OMG,0);
+            s_next.acc = s_next.acc + update_x.block<3,1>(StateIndex::ACC,0);
             s_next.bw = s_next.bw + update_x.block<3,1>(StateIndex::BW,0);
             s_next.ba = s_next.ba + update_x.block<3,1>(StateIndex::BA,0);
             if (online_gravity_estimation_enable) {
@@ -729,7 +743,7 @@ void EskfEstimator::UpdateByLidarIESKF(PointCloudXYZI &Dedistort_clouds_lidar) {
         calculate_total_ms += std::chrono::duration<double, std::milli>(SteadyClock::now() - calc_begin_tp).count();
         Eigen::MatrixXd H_kt = H_k.transpose();
         const auto solve_begin_tp = SteadyClock::now();
-        K = (H_kt * H_k + P_k_inv * kLidarPriorScale ).inverse() * H_kt;
+        K = (H_kt * H_k + P_k_inv * kLidarPriorScale).inverse() * H_kt;
         Eigen::MatrixXd left = -1 * K * Z_k;
         Eigen::MatrixXd right = -1 * (identity - K * H_k) * J_k_inv * error_s;
         Eigen::MatrixXd update_x = left + right;
@@ -750,6 +764,8 @@ void EskfEstimator::UpdateByLidarIESKF(PointCloudXYZI &Dedistort_clouds_lidar) {
         s_next.q.normalize();
         s_next.p  = s_next.p  + update_x.block<3,1>(StateIndex::P,0);
         s_next.v  = s_next.v  + update_x.block<3,1>(StateIndex::V,0);
+        s_next.omg = s_next.omg + update_x.block<3,1>(StateIndex::OMG,0);
+        s_next.acc = s_next.acc + update_x.block<3,1>(StateIndex::ACC,0);
         s_next.bw = s_next.bw + update_x.block<3,1>(StateIndex::BW,0);
         s_next.ba = s_next.ba + update_x.block<3,1>(StateIndex::BA,0);
         if (online_gravity_estimation_enable) {
@@ -787,6 +803,111 @@ void EskfEstimator::UpdateByLidarIESKF(PointCloudXYZI &Dedistort_clouds_lidar) {
         executed_iters >= iter_num,
         rematch_count
     });
+}
+
+EskfEstimator::PointUpdateResult
+EskfEstimator::UpdateByLidarImuGroup(PointCloudXYZI &points_lidar) {
+    PointUpdateResult result;
+    result.input_points = static_cast<int>(points_lidar.size());
+    if (points_lidar.empty() || !imu_update_enable || state_.in_elevator) return result;
+
+    prepareFrameCache(points_lidar);
+    evaluatePointMatches(state_, points_lidar, true);
+    result.matched_points = static_cast<int>(effective_indices_.size());
+    result.insertion_neighbors = Nearest_Points;
+
+    if (down_reject_cloud_lidar) {
+        for (int index : reject_indices_) {
+            down_reject_cloud_lidar->points.push_back(
+                    points_lidar.points[static_cast<std::size_t>(index)]);
+        }
+    }
+    if (effective_indices_.empty()) return result;
+
+    using StateVector = Eigen::Matrix<double, StateIndex::STATE_TOTAL, 1>;
+    using StateMatrix = Eigen::Matrix<double, StateIndex::STATE_TOTAL,
+                                      StateIndex::STATE_TOTAL>;
+    const Eigen::Index measurement_count =
+            static_cast<Eigen::Index>(effective_indices_.size());
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(
+            measurement_count, StateIndex::STATE_TOTAL);
+    Eigen::VectorXd residual(measurement_count);
+    const Eigen::Matrix3d R_wb = state_.q.toRotationMatrix();
+
+    for (Eigen::Index row = 0; row < measurement_count; ++row) {
+        const std::size_t i = static_cast<std::size_t>(
+                effective_indices_[static_cast<std::size_t>(row)]);
+        const Eigen::Vector3d dr =
+                -norm_vector_[i].norm_vec.transpose() * R_wb *
+                skew3d(norm_vector_[i].point_imu_xyz);
+        H.block<1, 3>(row, StateIndex::R) = dr.transpose();
+        H.block<1, 3>(row, StateIndex::P) =
+                norm_vector_[i].norm_vec.transpose();
+        residual(row) = norm_vector_[i].d;
+        result.max_abs_residual = std::max(
+                result.max_abs_residual, std::abs(residual(row)));
+    }
+
+    const StateMatrix prior_covariance = state_.P;
+    const Eigen::MatrixXd ph_t = prior_covariance * H.transpose();
+    Eigen::MatrixXd innovation = H * ph_t;
+    innovation.diagonal().array() += imu_update_lidar_measurement_variance;
+    if (!innovation.allFinite()) return result;
+
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(innovation);
+    if (ldlt.info() != Eigen::Success) return result;
+    const Eigen::MatrixXd kalman_gain =
+            ldlt.solve(ph_t.transpose()).transpose();
+    if (!kalman_gain.allFinite()) return result;
+
+    const StateVector dx = -kalman_gain * residual;
+    if (!dx.allFinite()) return result;
+
+    state_.q = state_.q.toRotationMatrix() *
+               so3Exp(dx.template segment<3>(StateIndex::R));
+    state_.q.normalize();
+    state_.p += dx.template segment<3>(StateIndex::P);
+    state_.v += dx.template segment<3>(StateIndex::V);
+    state_.omg += dx.template segment<3>(StateIndex::OMG);
+    state_.acc += dx.template segment<3>(StateIndex::ACC);
+    state_.bw += dx.template segment<3>(StateIndex::BW);
+    state_.ba += dx.template segment<3>(StateIndex::BA);
+    if (online_gravity_estimation_enable) {
+        state_.g += dx.template segment<3>(StateIndex::G);
+    }
+    state_.z += dx(StateIndex::Z);
+    state_.vz += dx(StateIndex::VZ);
+    state_.az += dx(StateIndex::AZ);
+
+    const StateMatrix identity = StateMatrix::Identity();
+    const Eigen::MatrixXd correction = identity - kalman_gain * H;
+    StateMatrix covariance = correction * prior_covariance * correction.transpose();
+    covariance.noalias() += imu_update_lidar_measurement_variance *
+                            (kalman_gain * kalman_gain.transpose());
+    StateMatrix reset_jacobian = identity;
+    reset_jacobian.template block<3, 3>(StateIndex::R, StateIndex::R) =
+            A_T(dx.template segment<3>(StateIndex::R)).transpose();
+    state_.P = reset_jacobian * covariance * reset_jacobian.transpose();
+    state_.P = 0.5 * (state_.P + state_.P.transpose());
+
+    if (down_effect_cloud_lidar) {
+        for (int index : effective_indices_) {
+            down_effect_cloud_lidar->points.push_back(
+                    points_lidar.points[static_cast<std::size_t>(index)]);
+        }
+        down_effect_cloud_lidar->width =
+                static_cast<std::uint32_t>(down_effect_cloud_lidar->points.size());
+        down_effect_cloud_lidar->height = 1;
+        down_effect_cloud_lidar->is_dense = true;
+    }
+    if (down_reject_cloud_lidar) {
+        down_reject_cloud_lidar->width =
+                static_cast<std::uint32_t>(down_reject_cloud_lidar->points.size());
+        down_reject_cloud_lidar->height = 1;
+        down_reject_cloud_lidar->is_dense = true;
+    }
+    result.updated_points = result.matched_points;
+    return result;
 }
 
 void EskfEstimator::UpdateByWheel(std::deque<WheelData> buf) {
@@ -858,11 +979,15 @@ void EskfEstimator::UpdateByWheel(std::deque<WheelData> buf) {
         0.5*delta_dstate(1),
         0.5*delta_dstate(2));
     state_.q = (state_.q * dq).normalized();
-    state_.p += delta_dstate.segment<3>(3);
-    state_.v += delta_dstate.segment<3>(6);
-    state_.bw += delta_dstate.segment<3>(9);
-    state_.ba += delta_dstate.segment<3>(12);
-    state_.g += delta_dstate.segment<3>(15);
+    state_.p += delta_dstate.segment<3>(StateIndex::P);
+    state_.v += delta_dstate.segment<3>(StateIndex::V);
+    state_.omg += delta_dstate.segment<3>(StateIndex::OMG);
+    state_.acc += delta_dstate.segment<3>(StateIndex::ACC);
+    state_.bw += delta_dstate.segment<3>(StateIndex::BW);
+    state_.ba += delta_dstate.segment<3>(StateIndex::BA);
+    if (online_gravity_estimation_enable) {
+        state_.g += delta_dstate.segment<3>(StateIndex::G);
+    }
     // 更新协方差
     state_.P = state_.P - K * mat_C * state_.P;
 
@@ -886,10 +1011,12 @@ void EskfEstimator::UpdateByWheel(std::deque<WheelData> buf) {
 Eigen::Matrix<double,StateIndex::STATE_TOTAL,1> EskfEstimator::getErrorState(const State &s1, const  State &s2){
     Eigen::Matrix<double,StateIndex::STATE_TOTAL,1> es;
     es.setZero();
-    // 主状态18维
+    // 固定 27 维状态（含 output IMU 的 omg/acc 与电梯三状态）
     es.segment<3>(StateIndex::R)  = SO3Log((s2.q.conjugate() * s1.q).toRotationMatrix()); // δθ
     es.segment<3>(StateIndex::P)  = s1.p  - s2.p;
     es.segment<3>(StateIndex::V)  = s1.v  - s2.v;
+    es.segment<3>(StateIndex::OMG) = s1.omg - s2.omg;
+    es.segment<3>(StateIndex::ACC) = s1.acc - s2.acc;
     es.segment<3>(StateIndex::BW) = s1.bw - s2.bw;
     es.segment<3>(StateIndex::BA) = s1.ba - s2.ba;
     es.segment<3>(StateIndex::G)  = s1.g  - s2.g;
@@ -1076,11 +1203,47 @@ static bool planarFittingAndCheck1(const PointVector & points, Eigen::Vector4d &
     return true;
 }
 
+/**
+ * Point-LIO's exact five-point plane model.  It solves
+ * [x y z] n = -1, normalizes [n, 1], and accepts the plane only when every
+ * neighbor's orthogonal distance is within plane_threshold.
+ */
+static bool pointLioPlaneFit(const PointVector &points, Eigen::Vector4d &pabcd,
+                             double plane_threshold) {
+    constexpr int kPointLioMatchPoints = 5;
+    if (points.size() < kPointLioMatchPoints || !(plane_threshold > 0.0)) return false;
+
+    Eigen::Matrix<double, kPointLioMatchPoints, 3> A;
+    Eigen::Matrix<double, kPointLioMatchPoints, 1> b;
+    b.setConstant(-1.0);
+    for (int i = 0; i < kPointLioMatchPoints; ++i) {
+        A(i, 0) = static_cast<double>(points[static_cast<size_t>(i)].x);
+        A(i, 1) = static_cast<double>(points[static_cast<size_t>(i)].y);
+        A(i, 2) = static_cast<double>(points[static_cast<size_t>(i)].z);
+    }
+
+    const Eigen::Vector3d unnormalized_normal = A.colPivHouseholderQr().solve(b);
+    const double normal_norm = unnormalized_normal.norm();
+    if (!unnormalized_normal.allFinite() || !std::isfinite(normal_norm) || normal_norm <= 1e-12) {
+        return false;
+    }
+
+    pabcd.head<3>() = unnormalized_normal / normal_norm;
+    pabcd(3) = 1.0 / normal_norm;
+    for (int i = 0; i < kPointLioMatchPoints; ++i) {
+        const auto &point = points[static_cast<size_t>(i)];
+        const double distance = pabcd(0) * point.x + pabcd(1) * point.y +
+                                pabcd(2) * point.z + pabcd(3);
+        if (!std::isfinite(distance) || std::abs(distance) > plane_threshold) return false;
+    }
+    return true;
+}
+
 EskfEstimator::ZIcpResult EskfEstimator::matchZByIcpAgainstIkdTree(
         const PointCloudXYZI &clouds_lidar, const State &initial_state) const {
     ZIcpResult result;
-    if (ikdtree.Root_Node == nullptr) {
-        result.reason = "ikd-tree map is empty";
+    if (!ikd_map || ikd_map->empty()) {
+        result.reason = "local map is empty";
         return result;
     }
     if (clouds_lidar.size() < static_cast<size_t>(elevator_exit_icp_z_min_effective_points)) {
@@ -1224,12 +1387,12 @@ void EskfEstimator::evaluatePointMatches(const State &state, PointCloudXYZI &clo
     static IkdNearestQuery map_query;
 
     const size_t point_num = clouds_lidar.size();
-    const int near_points_num = std::max(1, ikdtree_match_knn);
+    const int near_points_num = usePointLioGate() ? 5 : std::max(1, ikdtree_match_knn);
     const Eigen::Matrix3d R_wb = state.q.toRotationMatrix();
 
 #ifdef MP_EN
-    omp_set_num_threads(MP_PROC_NUM);
-    #pragma omp parallel for schedule(guided, 16)
+    if (point_num >= 64) omp_set_num_threads(MP_PROC_NUM);
+    #pragma omp parallel for schedule(guided, 16) if(point_num >= 64)
 #endif
     for (size_t i = 0; i < point_num; ++i) {
         point_world_cache_[i] = R_wb * point_imu_vec_[i] + state.p;
@@ -1244,8 +1407,8 @@ void EskfEstimator::evaluatePointMatches(const State &state, PointCloudXYZI &clo
     reject_indices_.clear();
 
 #ifdef MP_EN
-    omp_set_num_threads(MP_PROC_NUM);
-    #pragma omp parallel for schedule(guided, 16)
+    if (point_num >= 64) omp_set_num_threads(MP_PROC_NUM);
+    #pragma omp parallel for schedule(guided, 16) if(point_num >= 64)
 #endif
     for (size_t i = 0; i < point_num; ++i) {
         PointType point_world = clouds_lidar.points[i];
@@ -1256,12 +1419,16 @@ void EskfEstimator::evaluatePointMatches(const State &state, PointCloudXYZI &clo
         auto &points_near = Nearest_Points[i];
         auto &distance_sq = knn_distance_sq_[i];
         const bool enough_neighbors = map_query.searchKnn(point_world, near_points_num, points_near, distance_sq);
-        if (!enough_neighbors || distance_sq[near_points_num - 1] > ikdtree_neighbor_max_dist2) {
+        if (!enough_neighbors ||
+            (!usePointLioGate() && distance_sq[near_points_num - 1] > ikdtree_neighbor_max_dist2)) {
             continue;
         }
 
         Eigen::Vector4d pabcd;
-        if (!planarFittingAndCheck1(points_near, pabcd, ikdtree_plane_fit_rmse_threshold)) {
+        const bool plane_valid = usePointLioGate()
+                ? pointLioPlaneFit(points_near, pabcd, ikdtree_plane_fit_rmse_threshold)
+                : planarFittingAndCheck1(points_near, pabcd, ikdtree_plane_fit_rmse_threshold);
+        if (!plane_valid) {
             continue;
         }
 
@@ -1271,7 +1438,11 @@ void EskfEstimator::evaluatePointMatches(const State &state, PointCloudXYZI &clo
         }
 
         bool accept = false;
-        if (useFastLioScoreGate()) {
+        if (usePointLioGate()) {
+            // Point-LIO: p_norm > match_s * pd2^2.
+            const double p_norm = std::max(point_imu_vec_[i].norm(), 1e-12);
+            accept = p_norm > ikdtree_pointlio_match_s * pd * pd;
+        } else if (useFastLioScoreGate()) {
             const double score = 1.0 - 0.9 * std::fabs(pd) / std::sqrt(std::max(point_lidar_range_[i], 1e-6));
             accept = score > ikdtree_score_min;
         } else {

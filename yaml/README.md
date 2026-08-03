@@ -264,12 +264,12 @@ downsample:
 | 字段 | 说明 |
 | --- | --- |
 | `enable` | 是否动态调整体素边长 |
-| `target_points` | 目标处理点率，单位为点/秒，不是点/帧 |
+| `target_points` | 所有 LiDAR 更新路径共用的目标处理点率，单位为点/秒，不是点/帧 |
 | `alpha` | 幂律控制指数，必须大于零 |
 | `min_voxel` | 允许使用的最小体素边长，单位为米 |
 | `max_voxel` | 允许使用的最大体素边长，单位为米 |
 
-程序会根据平滑后的 LiDAR 帧间隔，把 `target_points` 换算为当前帧目标点数。控制器按下式调整下一帧体素：
+程序会根据平滑后的 LiDAR 帧间隔，把 `target_points` 换算为当前帧目标点数。一个连续控制器跟踪所有扫描；逐帧和超限触发的逐 IMU 分组更新都使用同一个目标、同一个控制器和同一份降采样点云。控制器按下式调整下一帧体素：
 
 ```text
 v_next = v_current × (N_current / N_target)^(1 / alpha)
@@ -282,7 +282,7 @@ v_next = v_current × (N_current / N_target)^(1 / alpha)
 - 最终体素会限制在 `[min_voxel, max_voxel]` 范围内。
 - `alpha` 越小，调整越激进；越大，变化越平缓。
 
-`target_points` 是负载目标，不保证每一帧都精确得到相同点数。
+`target_points` 是负载目标，不保证每一帧都精确得到相同点数。当前建图默认的 `20000 points/s` 在 10 Hz LiDAR 上对应约 `2000` 点/帧。此前的双目标点率实验没有形成稳定收益，当前实现已移除该分支，避免更新路径隐式改变降采样行为。
 
 自适应控制器会对明显无效的配置进行保护：
 
@@ -314,10 +314,18 @@ adaptive.enable = false : filter_size
 
 ```yaml
 map:
+  type: "ikdtree"
   local_map_cube_len: 1500.0
+  ivox:
+    grid_resolution: 2.0
+    nearby_type: 6
+    max_search_range: 5.0
+    insert_voxel_size: 0.4
 ```
 
-`local_map_cube_len` 是局部 ikd-tree 地图立方体的边长，单位为米。设备接近局部地图边缘时，程序会移动局部地图区域并清理远离当前位置的旧地图点。
+`type` 可选 `ikdtree` 或 `ivox`。`ikdtree` 是默认稳定路径；`ivox` 是用于 Point-LIO 数据关联消融的实验后端。`local_map_cube_len` 是局部 ikd-tree 地图立方体的边长，单位为米。设备接近局部地图边缘时，程序会移动局部地图区域并清理远离当前位置的旧地图点。
+
+IVox 参数与 Point-LIO MID-360 配置对应：`grid_resolution` 是哈希网格边长，`nearby_type` 可选 6、18、26 邻域，`max_search_range` 是候选点搜索半径，`insert_voxel_size` 用于抑制同一细体素内的重复地图点。IVox 不使用 ikd-tree 的移动立方体删除逻辑。
 
 - 值较大：保留范围更广，但内存占用和树维护成本更高。
 - 值较小：内存压力更低，但长距离回环到旧区域时可能已经没有历史点。
@@ -654,23 +662,73 @@ estimator:
 支持：
 
 - `pose6` 或 `pose_6`：只构造与旋转、位置直接相关的 6 维 LiDAR 更新，推荐使用。
-- `full21` 或 `full_21`：按完整 21 维误差状态构造更新。
+- `full27` 或 `full_27`：按完整 27 维误差状态构造更新。
+- `full21` 或 `full_21`：旧配置兼容别名，读取后等价为 `full27`。
 
 LiDAR 点面残差只对位姿具有直接雅可比，因此 `pose6` 可以减少矩阵计算量，设计上与完整状态更新保持一致结果。无法识别的字符串会打印警告并回退到 `pose6`。
 
-### 12.2 在线重力估计
+### 12.2 IMU 更新增强与量程保护
+
+```yaml
+estimator:
+  imu_update:
+    enable: true
+    saturation:
+      gyro_limit_rad_s: 35.0
+      accel_limit_g: 5.0
+      process_noise_scale: 1000.0
+    output_state:
+      velocity_process_variance: 20.0
+      angular_rate_process_variance: 1000.0
+      acceleration_process_variance: 500.0
+      gyro_bias_process_variance: 1.0e-4
+      accel_bias_process_variance: 1.0e-4
+      gyro_measurement_variance: 0.1
+      accel_measurement_variance: 0.1
+    lidar_measurement_variance: 1.0e-2
+```
+
+`imu_update.enable` 是总开关：
+
+- `true`：允许在超量程扫描内启用 Point-LIO 风格的局部 replay。平时的初始化、实时 IMU
+  环形缓冲传播、普通去畸变和逐帧 IESKF 仍使用原始 input 模型。只要非电梯扫描包含达到
+  量程阈值的 IMU 样本，就从上一个 LiDAR 后验建立局部 `omg/acc` 状态，将点按相邻 IMU
+  时间区间分组并更新。扫描结束后保留常规状态后验，清除局部 `omg/acc` 交叉协方差，
+  再回到 input 传播。电梯内不启动该 replay。
+- `false`：使用原 Elevator-LIO 的 input IMU 传播，并且所有 LiDAR 扫描均逐帧更新。
+
+未达到阈值时，`true` 与 `false` 的定位计算路径相同。局部 replay 在独立状态和协方差上
+进行，不会使实时 IMU 环形缓冲在运行中切换模型。两种 LiDAR 更新使用相同的点面匹配和
+ikd-tree，地图点只在整帧完成后加入。
+
+| 字段 | 说明 |
+| --- | --- |
+| `enable` | 超量程扫描的局部 IMU 扩增状态及逐 IMU 分组 LiDAR 更新总开关 |
+| `saturation.gyro_limit_rad_s` | 陀螺仪逐轴绝对值阈值，单位为 `rad/s` |
+| `saturation.accel_limit_g` | 加速度计逐轴绝对值阈值，单位为 `g` |
+| `saturation.process_noise_scale` | input 传播遇到有限超限或无效轴时，对应过程噪声的放大倍数，最小为 `1.0` |
+| `output_state.*_process_variance` | `v/omg/acc/bw/ba` 的离散过程噪声权重 |
+| `output_state.gyro_measurement_variance` | 陀螺仪量测方差 |
+| `output_state.accel_measurement_variance` | 加速度计量测方差 |
+| `lidar_measurement_variance` | 逐 IMU 分组点面量测方差，单位为 `m²`，必须大于零 |
+
+量程检测逐轴进行，阈值直接使用配置值，不乘额外比例。有限超限值仍进入 `omg/acc`
+量测，超限掩码只用于触发本扫描的逐 IMU 分组更新；电梯内不触发分组更新。只有 NaN/Inf
+轴会被替换并从 IMU 量测矩阵中删除；NaN/Inf 加速度样本也不会参与电梯停靠状态机。
+
+### 12.3 在线重力估计
 
 ```yaml
 estimator:
   online_gravity_estimation_enable: false
 ```
 
-- `false`：初始化完成后固定使用初始化得到的重力，通常更稳定。
-- `true`：允许后续状态更新继续修正重力。
+- `false`（默认运行配置）：初始化完成后固定使用初始化得到的重力；当前 MID-360 回归中更稳。
+- `true`：允许后续状态更新通过交叉协方差继续修正重力，适合重力方向观测充分的数据做消融。
 
 只有在数据和运动能够充分观测重力方向时才建议开启在线估计。约束不足时，重力与加速度偏置、姿态误差可能耦合。
 
-### 12.3 LiDAR IESKF 迭代
+### 12.4 LiDAR IESKF 迭代
 
 ```yaml
 estimator:
@@ -694,16 +752,17 @@ estimator:
 
 重新匹配阈值用于判断当前线性化点变化是否已经足以使旧的点面对应失效。阈值过小会频繁 KNN 查询，阈值过大则可能继续使用不合适的旧对应。
 
-### 12.4 ikd-tree 点面匹配
+### 12.5 ikd-tree 点面匹配
 
 ```yaml
 estimator:
   ikdtree_match:
     knn: 5
-    plane_fit_rmse_threshold: 0.05
+    plane_fit_rmse_threshold: 0.1
     neighbor_max_dist2: 5.0
-    gate_mode: "linear_range"
+    gate_mode: "pointlio"
     score_min: 0.95
+    pointlio_match_s: 81.0
     match_thresh_base: 0.03
     match_thresh_scale: 0.01
 ```
@@ -711,14 +770,23 @@ estimator:
 | 字段 | 说明 |
 | --- | --- |
 | `knn` | 为每个当前点查询的地图近邻数量 |
-| `plane_fit_rmse_threshold` | 近邻点拟合平面的最大 RMSE，单位为米 |
-| `neighbor_max_dist2` | 最远近邻允许的最大平方距离，单位为 `m²`，注意不是米 |
-| `gate_mode` | 点面残差筛选方式，可选 `linear_range` 或 `fastlio_score` |
+| `plane_fit_rmse_threshold` | `pointlio` 模式下是五个近邻逐点到 QR 拟合平面的最大距离；其他模式下是 PCA 平面 RMSE，单位均为米 |
+| `neighbor_max_dist2` | 最远近邻允许的最大平方距离，单位为 `m²`；Point-LIO 原实现未使用该条件，因此 `pointlio` 模式忽略此项 |
+| `gate_mode` | 点面残差筛选方式，可选 `pointlio`、`linear_range` 或 `fastlio_score` |
 | `score_min` | `fastlio_score` 模式的最低接受分数 |
+| `pointlio_match_s` | `pointlio` 模式的残差门限系数，原始 Point-LIO 为 `81.0` |
 | `match_thresh_base` | `linear_range` 模式的基础残差门限，单位为米 |
 | `match_thresh_scale` | `linear_range` 模式随点距离增加的门限系数 |
 
-匹配首先要求：
+`pointlio` 模式严格采用五个近邻，通过 QR 求解平面，并要求五个近邻各自的点面距离都不超过 `plane_fit_rmse_threshold`。当前点的接受条件为：
+
+```text
+point_range > pointlio_match_s × point_to_plane_residual²
+```
+
+其中 `point_range` 是该点在 IMU 坐标系中的欧氏距离。该模式按 Point-LIO 原实现不再额外检查 `neighbor_max_dist2`。
+
+`linear_range` 和 `fastlio_score` 模式首先要求：
 
 1. 找到足够数量的近邻。
 2. 第 `knn` 个近邻的平方距离不超过 `neighbor_max_dist2`。
@@ -974,7 +1042,7 @@ visualize:
 
 | 字段 | 说明 |
 | --- | --- |
-| `CovMatrix_vis` | 使用 OpenCV 窗口实时显示 `21×21` 状态协方差矩阵 |
+| `CovMatrix_vis` | 使用 OpenCV 窗口实时显示 `27×27` 状态协方差矩阵 |
 | `EleState_vis` | 使用 OpenCV 窗口显示电梯状态历史曲线 |
 
 这两个选项：
@@ -995,6 +1063,7 @@ visualize:
 | 是否持续添加新地图点 | 是 | 否 |
 | `pub.high_frequency_odom` | `false` | `false` |
 | `pub.lidar_frequency` | `10.0` | `10.0` |
+| `estimator.imu_update.enable` | `true` | `true` |
 | `elevator.door_detector.filter_percent` | `0.06` | `0.03` |
 | `elevator.zupt.enable` | `true` | `false` |
 | `elevator.exit_icp_z.enable` | `false` | `true` |

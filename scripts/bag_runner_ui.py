@@ -61,6 +61,7 @@ PLAY_SUBSCRIPTION_WAIT_TIMEOUT_MS = 12000
 PLAY_AUTO_UNPAUSE_DELAY_MS = 1500
 BAG_PLAY_QUEUE_SIZE = 2000
 BAG_PLAY_ADVERTISE_DELAY_SEC = 1.0
+GRACEFUL_SHUTDOWN_TIMEOUT_SEC = 60.0
 IGNORED_BAG_PLAY_TOPICS = {"/clock", "/rosout", "/tf", "/tf_static"}
 OTHER_LIO_PROFILES = (
     {
@@ -1318,6 +1319,8 @@ class BagRunnerWindow(QtWidgets.QWidget):
         self.current_external_lio_profile: Optional[ExternalLioProfile] = None
         self.current_session_records_analysis = True
         self.waiting_for_lio_analysis = False
+        self.shutdown_finish_status = "Session stopped"
+        self.roscore_stop_requested = False
 
         self.build_proc = ManagedProcess("build", self)
         self.roscore_proc = ManagedProcess("roscore", self)
@@ -4140,6 +4143,7 @@ class BagRunnerWindow(QtWidgets.QWidget):
         self.lio_ready_detected = False
         self.lio_startup_error_detected = False
         self.waiting_for_lio_analysis = False
+        self.roscore_stop_requested = False
         try:
             with rosbag.Bag(entry.bag_path, "r") as bag:
                 self.current_bag_start_time = bag.get_start_time()
@@ -4602,15 +4606,26 @@ class BagRunnerWindow(QtWidgets.QWidget):
                 self._complete_batch_entry(self.pending_entry, "cancelled")
             self.batch_cancelled = True
             self.batch_queue_items = []
+        self._begin_ordered_shutdown("Session stopped")
+
+    def _begin_ordered_shutdown(self, finish_status: str) -> None:
+        """Stop ROS clients first and the owned ROS master last.
+
+        roscpp unregisters publishers/subscribers while a node exits.  Killing
+        the master at the same time produces XmlRpcClient connection-refused
+        errors and can interrupt LIO's shutdown-time map persistence.
+        """
+        if self.stopping_session:
+            return
         self.node_wait_timer.stop()
         self.awaiting_auto_unpause = False
         self.stopping_session = True
-        self.stop_deadline_wall = time.time() + 8.0
+        self.shutdown_finish_status = finish_status
+        self.roscore_stop_requested = False
+        self.stop_deadline_wall = time.time() + GRACEFUL_SHUTDOWN_TIMEOUT_SEC
         for proc in [self.build_proc, self.play_proc, self.rviz_proc, self.lio_proc]:
             proc.terminate()
-        if self.started_roscore and self.roscore_proc.is_running():
-            self.roscore_proc.terminate()
-        self._set_status("Stopping session")
+        self._set_status("Stopping ROS clients before roscore")
         self.stop_timer.start()
         self._update_buttons()
 
@@ -4628,19 +4643,22 @@ class BagRunnerWindow(QtWidgets.QWidget):
             if time.time() > self.stop_deadline_wall:
                 self._force_stop_remaining()
                 self.stop_timer.stop()
-                self._finish_session("Session stopped")
+                self._finish_session(self.shutdown_finish_status)
             return
         if self.started_roscore and self.roscore_proc.is_running():
-            self.roscore_proc.terminate()
+            self._set_status("Stopping roscore")
+            if not self.roscore_stop_requested:
+                self.roscore_proc.terminate()
+                self.roscore_stop_requested = True
             if time.time() > self.stop_deadline_wall:
                 self.roscore_proc.kill()
             return
         self.stop_timer.stop()
-        self._finish_session("Session stopped")
+        self._finish_session(self.shutdown_finish_status)
 
-    def _maybe_close_rviz_after_playback(self) -> None:
+    def _maybe_close_rviz_after_playback(self) -> bool:
         if not self.rviz_proc.is_running():
-            return
+            return True
         reply = QtWidgets.QMessageBox.question(
             self,
             "Close RViz",
@@ -4651,8 +4669,10 @@ class BagRunnerWindow(QtWidgets.QWidget):
         if reply == QtWidgets.QMessageBox.Yes:
             self._append_lio_log("[info] closing rviz after playback")
             self.rviz_proc.terminate()
+            return True
         else:
             self._append_lio_log("[info] keeping rviz open after playback")
+            return False
 
     def _handle_external_playback_finished(self) -> None:
         reply = QtWidgets.QMessageBox.question(
@@ -4663,12 +4683,7 @@ class BagRunnerWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.No,
         )
         if reply == QtWidgets.QMessageBox.Yes:
-            if self.lio_proc.is_running():
-                self.lio_proc.terminate()
-            if self.started_roscore and self.roscore_proc.is_running():
-                self.roscore_proc.terminate()
-            self._maybe_close_rviz_after_playback()
-            self._finish_session("Playback finished")
+            self._begin_ordered_shutdown("Playback finished")
             return
         self._append_lio_log("[info] keeping external LIO running after playback")
         self._set_status("Playback finished; external LIO still running")
@@ -4698,6 +4713,8 @@ class BagRunnerWindow(QtWidgets.QWidget):
         self.current_external_lio_profile = None
         self.current_session_records_analysis = True
         self.waiting_for_lio_analysis = False
+        self.shutdown_finish_status = "Session stopped"
+        self.roscore_stop_requested = False
         self.current_batch_run_item = None
         self._set_status(status)
         self._update_buttons()
@@ -5054,8 +5071,18 @@ class BagRunnerWindow(QtWidgets.QWidget):
             self.waiting_for_lio_analysis = False
             self._append_lio_log(f"[info] lio exited after playback ({status}, code={exit_code})")
             self._record_playback_analysis()
-            self._maybe_close_rviz_after_playback()
-            self._finish_session("Playback finished")
+            rviz_closing = self._maybe_close_rviz_after_playback()
+            if self.started_roscore and not rviz_closing:
+                # An RViz kept open still needs the master.  Leave the session
+                # active so the Stop button can later close RViz and roscore in
+                # the correct order.
+                self._set_status("Playback finished; RViz and roscore kept running")
+                self._update_buttons()
+                return
+            if self.started_roscore:
+                self._begin_ordered_shutdown("Playback finished")
+            else:
+                self._finish_session("Playback finished")
             return
         if self.stopping_session:
             self._append_lio_log(f"[info] lio exited during shutdown ({status}, code={exit_code})")
@@ -5084,9 +5111,10 @@ class BagRunnerWindow(QtWidgets.QWidget):
             return
         self._append_lio_log(f"[info] lio exited ({status}, code={exit_code})")
         if self.current_external_lio_profile is not None and not self.play_proc.is_running():
-            if self.started_roscore and self.roscore_proc.is_running():
-                self.roscore_proc.terminate()
-            self._finish_session("External LIO stopped")
+            if self.started_roscore:
+                self._begin_ordered_shutdown("External LIO stopped")
+            else:
+                self._finish_session("External LIO stopped")
 
     def _on_rviz_finished(self, exit_code: int, status: str) -> None:
         if not self.session_running:
@@ -5111,24 +5139,22 @@ class BagRunnerWindow(QtWidgets.QWidget):
                     self.waiting_for_lio_analysis = True
                     self._set_status("Waiting for LIO to save artifacts")
                     self.lio_proc.terminate()
-                    if self.started_roscore and self.roscore_proc.is_running():
-                        self.roscore_proc.terminate()
                     return
-                if self.started_roscore and self.roscore_proc.is_running():
-                    self.roscore_proc.terminate()
                 self._record_playback_analysis()
-                self._maybe_close_rviz_after_playback()
-                self._finish_session("Playback finished")
+                rviz_closing = self._maybe_close_rviz_after_playback()
+                if self.started_roscore and not rviz_closing:
+                    self._set_status("Playback finished; RViz and roscore kept running")
+                    self._update_buttons()
+                    return
+                if self.started_roscore:
+                    self._begin_ordered_shutdown("Playback finished")
+                else:
+                    self._finish_session("Playback finished")
             else:
                 self._append_lio_log("[info] external LIO session finished; analysis skipped")
                 self._handle_external_playback_finished()
         else:
-            if self.lio_proc.is_running():
-                self.lio_proc.terminate()
-            if self.started_roscore and self.roscore_proc.is_running():
-                self.roscore_proc.terminate()
-            self._maybe_close_rviz_after_playback()
-            self._finish_session("Playback failed")
+            self._begin_ordered_shutdown("Playback failed")
 
     def _update_buttons(self) -> None:
         has_selection = self._selected_row() >= 0

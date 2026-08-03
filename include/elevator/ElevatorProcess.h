@@ -22,7 +22,7 @@
  * 约定：
  *  - 世界 z 轴向上为正，重力 g 指向下（模≈9.81）。因此 “向上单位向量”
  *    ezu = -g / ||g||。所有“水平/竖直”计算均以 ezu 为基准。
- *  - 进入/退出只会切换 S.in_elevator 开关，不改变状态维度；STATE_TOTAL 固定 21。
+ *  - 进入/退出只会切换 S.in_elevator 开关，不改变状态维度；STATE_TOTAL 固定 27。
  *  - 1D 子状态 (z, vz, az) 的名义传播与 Q 注入在 stepProcess() 内完成。
  */
 class ElevatorProcess {
@@ -76,7 +76,7 @@ private:
 /**
  * @brief 你项目里的 ESKF 量测更新模板（标量/小维量测）
  *
- * 需要配合列数 = StateIndex::STATE_TOTAL(=21) 的 H 使用：
+ * 需要配合列数 = StateIndex::STATE_TOTAL(=27) 的 H 使用：
  *   K = P Hᵀ (H P Hᵀ + R)^{-1}
  *   注入 + Joseph 形式更新协方差
  * 约定：这是“约束残差”写法 r(x)≈H δx，目标是 r→0，因此 δx = -K r
@@ -88,7 +88,7 @@ inline void ekfUpdate(State& S,
                       const Eigen::Matrix<double, M, 1>& r,
                       const Eigen::Matrix<double, M, M>& R)
 {
-    constexpr int NX = StateIndex::STATE_TOTAL; // 21
+    constexpr int NX = StateIndex::STATE_TOTAL;
     using MatXX = Eigen::Matrix<double, NX, NX>;
     using MatXM = Eigen::Matrix<double, NX, M >;
     using MatMM = Eigen::Matrix<double, M , M >;
@@ -96,10 +96,10 @@ inline void ekfUpdate(State& S,
 
     // --- 0) 早退与断言 ---
     if (H.rows() == 0) return;
-    assert(H.cols() == NX && "H must have 22 columns");
+    assert(H.cols() == NX && "H must have StateIndex::STATE_TOTAL columns");
 
     // --- 1) K = P Hᵀ (H P Hᵀ + R)^{-1}  （用分解+solve，避免显式逆）---
-    const MatXM PHt = S.P * H.transpose();   // 22×M
+    const MatXM PHt = S.P * H.transpose();   // NX×M
     MatMM S_innov   = H * PHt + R;           // M×M
 
     Eigen::LDLT<MatMM> ldlt(S_innov);
@@ -109,18 +109,20 @@ inline void ekfUpdate(State& S,
         S_innov.diagonal().array() += eps;
         ldlt.compute(S_innov);
     }
-    const MatXM K = PHt * ldlt.solve(MatMM::Identity()); // 22×M
+    const MatXM K = PHt * ldlt.solve(MatMM::Identity()); // NX×M
 
     // --- 2) 状态增量（约束残差：δx = K r）---
-    const VecX dx = K * r;                // 22×1
+    const VecX dx = K * r;                // NX×1
 
     // --- 3) 在流形上注入（姿态左乘，其余加性）---
     const Eigen::Vector3d dtheta = dx.template segment<3>(StateIndex::R);
     // S.q = (S.q * so3Exp(dtheta)).normalized();
-    S.q = S.q * so3Exp(dtheta);
+    S.q = (S.q * Eigen::Quaterniond(so3Exp(dtheta))).normalized();
 
     S.p  += dx.template segment<3>(StateIndex::P);
     S.v  += dx.template segment<3>(StateIndex::V);
+    S.omg += dx.template segment<3>(StateIndex::OMG);
+    S.acc += dx.template segment<3>(StateIndex::ACC);
     S.bw += dx.template segment<3>(StateIndex::BW);
     S.ba += dx.template segment<3>(StateIndex::BA);
     S.g  += dx.template segment<3>(StateIndex::G);
@@ -132,7 +134,7 @@ inline void ekfUpdate(State& S,
 
     // --- 4) 协方差（Joseph 形式，数值稳健）---
     const MatXX I  = MatXX::Identity();
-    const MatXX KH = K * H;                 // 22×22
+    const MatXX KH = K * H;                 // NX×NX
     S.P = (I - KH) * S.P * (I - KH).transpose() + K * R * K.transpose();
 
     // --- 5) ESKF reset（姿态误差重中心化）---

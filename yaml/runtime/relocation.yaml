@@ -10,13 +10,20 @@ downsample:
   # Feature 功能 —— 自适应降采样，且控制的是每秒点数而不是每帧点数，适用性较广
   adaptive:
     enable: true # 是否启用变体素大小降采样 (根据点数自动调整体素大小)
-    target_points: 20000 # 目标每秒点数 (会按输入时间戳折算到每帧)
+    target_points: 20000 # 所有 LiDAR 更新共用的目标点率 [points/s]
     alpha: 1.2 # 幂律指数
     min_voxel: 0.05 # 最小体素
     max_voxel: 0.8 # 最大体素
 
 map:
+  type: "ikdtree" # 重定位默认继续使用 ikd-tree
   local_map_cube_len: 3000.0 # 局部 ikd-tree 地图立方体边长 [m]，超出时清理旧地图
+  ivox:
+    grid_resolution: 2.0
+    nearby_type: 6
+    max_search_range: 5.0
+    insert_voxel_size: 0.4
+    initial_voxel_size: 0.0
 
 relocation:
   # Feature 功能 —— 将pcd文件预先加载进 ikdtree 中，同时关闭地图积累，可用于重定位，但仅能在原点附近启动
@@ -87,8 +94,23 @@ wheel:
   wheel_enable: false # 是否启用轮速计更新
 
 estimator:
-  lidar_update_mode: "pose6" # pose6 只求解位姿（推荐）；full21 求解完整 21 维误差状态
-  online_gravity_estimation_enable: false # 是否在线估计重力；false 时固定使用初始化重力
+  lidar_update_mode: "pose6" # pose6 只构建位姿量测（推荐）；full27 使用完整 27 维误差状态；兼容旧 full21 别名
+  imu_update:
+    enable: true # 总开关：仅非电梯扫描超量程时局部扩增 omg/acc 并按 IMU 时间间隔更新
+    saturation:
+      gyro_limit_rad_s: 35.0
+      accel_limit_g: 2.0
+      process_noise_scale: 1000.0
+    output_state:
+      velocity_process_variance: 20.0
+      angular_rate_process_variance: 1000.0
+      acceleration_process_variance: 500.0
+      gyro_bias_process_variance: 1.0e-4
+      accel_bias_process_variance: 1.0e-4
+      gyro_measurement_variance: 0.1
+      accel_measurement_variance: 0.1
+    lidar_measurement_variance: 1.0e-3
+  online_gravity_estimation_enable: false # 默认固定初始化重力；观测充分时可开启 LiDAR/IMU 交叉协方差修正
 
   lidar_ieskf:
     max_iterations: 4 # 每帧最大迭代次数
@@ -98,9 +120,10 @@ estimator:
     rematch_pos_m: 2.0e-3 # 触发重新匹配的位置阈值 [m]
   ikdtree_match:
     knn: 5 # 最近邻数量
-    plane_fit_rmse_threshold: 0.05 # 平面拟合 RMSE 阈值 [m]
-    neighbor_max_dist2: 5.0 # 最远邻点的最大平方距离 [m^2]
-    gate_mode: "linear_range" # 匹配门限模式：linear_range / fastlio_score
+    plane_fit_rmse_threshold: 0.1 # pointlio 模式下为 5 个近邻逐点到拟合平面的距离阈值 [m]
+    neighbor_max_dist2: 5.0 # 最远邻点的最大平方距离 [m^2]；pointlio 模式按原实现不使用此项
+    gate_mode: "pointlio" # pointlio：range > match_s * residual^2；另支持 linear_range / fastlio_score
     score_min: 0.95 # fastlio_score 模式的最低分数
+    pointlio_match_s: 81.0 # Point-LIO 原始匹配门限系数
     match_thresh_base: 0.03 # linear_range 模式的基础残差阈值 [m]
     match_thresh_scale: 0.01 # linear_range 模式的距离缩放系数

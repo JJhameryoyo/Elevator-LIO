@@ -394,11 +394,17 @@ extern Eigen::Vector2d box_corner_y; // 长方体 y 轴范围 [min, max]
 extern Eigen::Vector2d box_corner_z; // 长方体 z 轴范围 [min, max]
 extern float filter_size; // 点云降采样大小（ikdtree大小）
 extern bool downsample_adaptive_enabled; // 是否启用变体素大小降采样
-extern double downsample_target_points; // Adaptive voxel target points per second
+extern double downsample_target_points; // 所有 LiDAR 更新共用的目标点率 [points/s]
 extern double downsample_alpha;         // Adaptive voxel alpha
 extern double downsample_min_voxel;     // Adaptive voxel min
 extern double downsample_max_voxel;     // Adaptive voxel max
 extern double local_map_cube_len;       // Local ikd-tree map cube edge length in metres
+extern string map_type;                 // ikdtree / ivox
+extern double ivox_grid_resolution;
+extern int ivox_nearby_type;
+extern double ivox_max_search_range;
+extern double ivox_insert_voxel_size;
+extern double ivox_initial_voxel_size;
 
 // 根据当前盲区配置判断 LiDAR 原始点是否保留。
 // box 模式会删除长方体内（含边界）的自遮挡点；其他模式删除 blind 半径内的点。
@@ -442,7 +448,16 @@ extern string global_map_topic_name; // world系全局地图发布的话题名
 extern string ikdtree_topic_name; // world系 ikdtree 发布的话题名
 extern string odom_imu_topic_name; // imu位姿的话题名
 extern string odom_vehicle_topic_name; // body位姿的话题名
-extern string lidar_update_mode; // lidar更新模式: pose6 / full21
+extern string lidar_update_mode; // lidar更新模式: pose6 / full27（兼容旧 full21 别名）
+extern bool imu_update_enable; // 超量程时 output-IMU 局部重放 + 逐 IMU 分组更新总开关
+extern double output_imu_velocity_process_variance;
+extern double output_imu_angular_rate_process_variance;
+extern double output_imu_acceleration_process_variance;
+extern double output_imu_gyro_bias_process_variance;
+extern double output_imu_accel_bias_process_variance;
+extern double output_imu_gyro_measurement_variance;
+extern double output_imu_accel_measurement_variance;
+extern double imu_update_lidar_measurement_variance; // 逐 IMU 分组点面量测方差 [m^2]
 extern bool online_gravity_estimation_enable; // 是否在线估计重力加速度状态
 extern int lidar_ieskf_max_iterations;
 extern double lidar_ieskf_converge_rot_rad;
@@ -452,10 +467,14 @@ extern double lidar_ieskf_rematch_pos_m;
 extern int ikdtree_match_knn;
 extern double ikdtree_plane_fit_rmse_threshold;
 extern double ikdtree_neighbor_max_dist2;
-extern string ikdtree_gate_mode; // fastlio_score / linear_range
+extern string ikdtree_gate_mode; // pointlio / fastlio_score / linear_range
 extern double ikdtree_score_min;
+extern double ikdtree_pointlio_match_s;
 extern double ikdtree_match_thresh_base;
 extern double ikdtree_match_thresh_scale;
+extern double imu_saturation_gyro_limit_rad_s;
+extern double imu_saturation_accel_limit_g;
+extern double imu_saturation_process_noise_scale;
 extern bool relocation_enable; // 是否启用重定位
 extern string pcd_load_name; // 重定位时，加载的点云文件名
 

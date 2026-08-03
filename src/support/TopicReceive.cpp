@@ -54,7 +54,6 @@ double inferPointTimeToMillisecond(double raw_time) {
  */
 void TopicProcess::receive_points_ntu(const lio_ros::PointCloud2ConstPtr &msg)
 {
-    if (FSM::current_state == FSM::State::Initializing) return;
     cloud_topic_count_++;
     double timestamp = get_time_sec(msg->header.stamp);
 
@@ -305,7 +304,6 @@ void TopicProcess::receive_points_velodyne(const lio_ros::PointCloud2ConstPtr& m
 
 void TopicProcess::receive_points_xt32(const lio_ros::PointCloud2ConstPtr &msg)
 {
-    if (FSM::current_state == FSM::State::Initializing) return;
     cloud_topic_count_++;
     double timestamp = get_time_sec(msg->header.stamp);
 
@@ -513,20 +511,34 @@ void TopicProcess::receive_imu(const lio_ros::ImuConstPtr& msg)
 
 
     static lio_ros::ImuConstPtr last_imu_msg = msg;
-    Eigen::Vector3d last_ang(last_imu_msg->angular_velocity.x,
-                             last_imu_msg->angular_velocity.y,
-                             last_imu_msg->angular_velocity.z);
-    Eigen::Vector3d curr_ang(msg->angular_velocity.x,
-                             msg->angular_velocity.y,
-                             msg->angular_velocity.z);
+    const Eigen::Vector3d last_ang(last_imu_msg->angular_velocity.x,
+                                   last_imu_msg->angular_velocity.y,
+                                   last_imu_msg->angular_velocity.z);
+    const Eigen::Vector3d curr_ang(msg->angular_velocity.x,
+                                   msg->angular_velocity.y,
+                                   msg->angular_velocity.z);
+    const bool nonfinite_gyro = !curr_ang.allFinite();
+    const bool possible_gyro_saturation = imu_update_enable &&
+            !nonfinite_gyro &&
+            (curr_ang.array().abs() >= imu_saturation_gyro_limit_rad_s).any();
+    const bool previous_gyro_saturation = imu_update_enable &&
+            last_ang.allFinite() &&
+            (last_ang.array().abs() >= imu_saturation_gyro_limit_rad_s).any();
 
-    if ((curr_ang - last_ang).norm() > THRE_DIFF_IMU) {
-        std::cerr << "[receive_imu] imu_acc outliers detected!\n";
+    if (!possible_gyro_saturation && !previous_gyro_saturation &&
+        curr_ang.allFinite() && last_ang.allFinite() &&
+        (curr_ang - last_ang).norm() > THRE_DIFF_IMU) {
+        // 保留旧版对普通角速度突变的整帧替换行为，避免扩大本次移植的逻辑范围。
         lio_ros::ImuPtr corrected_msg(new lio_ros::Imu(*last_imu_msg));
         corrected_msg->header.stamp = msg->header.stamp;
         buffers_->pushBackSafe(buffers_->imu_buf, corrected_msg);
+        LOG_WARN(Sensor, "IMU angular-rate jump rejected, norm_diff="
+                         << (curr_ang - last_ang).norm());
     } else {
-        last_imu_msg = msg;
+        // 超量程的有限值必须原样交给 IMUProcess。从超量程恢复到
+        // 正常值的第一跳也必须放行，否则旧的突变过滤会反复复用超量程样本。
+        // 只有 NaN/Inf 不能成为下一次离群检查的参考。
+        if (!nonfinite_gyro) last_imu_msg = msg;
         buffers_->pushBackSafe(buffers_->imu_buf, msg);
     }
 

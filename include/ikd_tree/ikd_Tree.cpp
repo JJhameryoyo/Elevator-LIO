@@ -395,23 +395,25 @@ void KD_TREE<PointType>::Nearest_Search(
     q.clear();
     // wgh 交换内存空间（实质上是交换指针地址），相当于清空了Point_Distance？
     vector<float> ().swap(Point_Distance); 
-    if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){
-        Search(Root_Node, k_nearest, point, q, max_dist); // wgh 实质的搜索函数，递归调用。
-    } else {
+    // Every complete query participates in the reader counter.  The original
+    // guard was only entered when the root itself was rebuilt, allowing a
+    // background subtree swap to replace/free nodes while a query still
+    // traversed that subtree.  The rebuild thread already waits for this
+    // counter before flattening and swapping, so guarding the full query closes
+    // the race while retaining asynchronous rebuilding.
+    pthread_mutex_lock(&search_flag_mutex);
+    while (search_mutex_counter == -1)
+    {
+        pthread_mutex_unlock(&search_flag_mutex);
+        usleep(1);
         pthread_mutex_lock(&search_flag_mutex);
-        while (search_mutex_counter == -1)
-        {
-            pthread_mutex_unlock(&search_flag_mutex);
-            usleep(1);
-            pthread_mutex_lock(&search_flag_mutex);
-        }
-        search_mutex_counter += 1;
-        pthread_mutex_unlock(&search_flag_mutex);  
-        Search(Root_Node, k_nearest, point, q, max_dist); // wgh 实质的搜索函数，递归调用。
-        pthread_mutex_lock(&search_flag_mutex);
-        search_mutex_counter -= 1;
-        pthread_mutex_unlock(&search_flag_mutex);      
     }
+    search_mutex_counter += 1;
+    pthread_mutex_unlock(&search_flag_mutex);
+    Search(Root_Node, k_nearest, point, q, max_dist);
+    pthread_mutex_lock(&search_flag_mutex);
+    search_mutex_counter -= 1;
+    pthread_mutex_unlock(&search_flag_mutex);
     int k_found = min(k_nearest,int(q.size()));
     PointVector ().swap(Nearest_Points);
     vector<float> ().swap(Point_Distance);

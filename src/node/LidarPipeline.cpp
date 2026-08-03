@@ -17,6 +17,9 @@
 #include <pcl/filters/voxel_grid.h>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 
 // ===================== LidarPipeline =====================
 
@@ -32,12 +35,13 @@ LidarPipeline::LidarPipeline(lio_ros::Node& nh,
     , elevator_self_exit_(elevator_self_exit)
     , ikd_map_(std::move(ikd_map))
     , raw_clouds_lidar_(new PointCloudXYZI)
-    , cloud_init_accum_lidar_(new PointCloudXYZI)
     , cloud_init_lidar_(new PointCloudXYZI)
     , cloud_init_world_(new PointCloudXYZI)
     , rebuild_map_accum_lidar_(new PointCloudXYZI)
     , downsampled_cloud_(new PointCloudXYZI)
     , blind_filtered_(new PointCloudXYZI)
+    , point_group_cloud_(new PointCloudXYZI)
+    , point_world_cloud_(new PointCloudXYZI)
 {
     ele_state_pub_ = nh.advertise<lio_ros::Bool>("/LIO/in_elevator", 1, true);
     elevator_estimate_pub_ = nh.advertise<lio_ros::ElevatorState>("/LIO/elevator_state", 1, true);
@@ -61,9 +65,16 @@ void LidarPipeline::initAdaptiveVoxel() {
         current_voxel_ = voxel_ctrl_.voxel();
         voxel_ctrl_initialized_ = true;
     }
+
 }
 
 void LidarPipeline::updateAdaptiveConfig(double end_time) {
+    // A temporal-update attempt can fall back to the ordinary frame path.
+    // Both calls must use the same voxel and advance the controller at most
+    // once for this LiDAR scan.
+    frame_voxel_ = current_voxel_;
+    downsample_controller_updated_this_frame_ = false;
+    downsample_logged_this_frame_ = false;
     if (!downsample_adaptive_enabled) return;
 
     double lidar_dt = 0.0;
@@ -97,7 +108,8 @@ void LidarPipeline::updateAdaptiveConfig(double end_time) {
 
 void LidarPipeline::applyVoxelFilter(const PointCloudXYZI::Ptr& in,
                                       PointCloudXYZI::Ptr& out,
-                                      double blind_dist) {
+                                      double blind_dist,
+                                      double voxel_size) {
     out->clear();
     if (!in || in->empty()) return;
     blind_filtered_->clear();
@@ -109,7 +121,8 @@ void LidarPipeline::applyVoxelFilter(const PointCloudXYZI::Ptr& in,
         blind_filtered_->points.push_back(pt);
     }
     if (blind_filtered_->empty()) return;
-    uniform_voxel_.setLeafSize(current_voxel_, current_voxel_, current_voxel_);
+    const float leaf_size = static_cast<float>(voxel_size);
+    uniform_voxel_.setLeafSize(leaf_size, leaf_size, leaf_size);
     uniform_voxel_.setInputCloud(blind_filtered_);
     uniform_voxel_.filter(*out);
 }
@@ -131,29 +144,39 @@ bool LidarPipeline::dequeueFrame(FrameData& out) {
 bool LidarPipeline::handleFirstLidarInit(const FrameData& frame) {
     if (!first_lidar_ || relocation_enable) return false;
 
-    cloud_init_accum_lidar_->points.insert(
-        cloud_init_accum_lidar_->points.end(),
-        frame.raw_cloud->points.begin(), frame.raw_cloud->points.end());
-    cloud_init_accum_lidar_->width = static_cast<uint32_t>(cloud_init_accum_lidar_->points.size());
-    cloud_init_accum_lidar_->height = 1;
-    cloud_init_accum_lidar_->is_dense = false;
-    init_lidar_accum_count_++;
-
-    if (init_lidar_accum_count_ < kInitLidarAccumFrames) {
+    // Point-LIO's MID360 launch seeds IVox with one full, undistorted scan.
+    // LiDAR frames can have accumulated while the IMU was initializing. Drop
+    // those stale frames just as Point-LIO does until a whole scan is covered.
+    if (!imu_process_.coversTimeRange(frame.base_time, frame.end_time)) {
         shared_bufs_->popFrontLidarFrameSafe();
-        return true; // still accumulating
+        return true;
     }
-
-    ikdtree.set_downsample_param(min_filter_size);
-    applyVoxelFilter(cloud_init_accum_lidar_, cloud_init_lidar_, blind);
+    State init_state;
+    bool init_in_elevator = false;
+    resolveFrameState(frame, init_state, init_in_elevator);
+    if (!undistortFrame(frame, init_state, cloud_init_lidar_)) {
+        shared_bufs_->popFrontLidarFrameSafe();
+        return true;
+    }
+    estimator_->set_cur_state(init_state);
     cloud_init_world_ = estimator_->transLidar2World(*cloud_init_lidar_);
-    ikd_map_->add(cloud_init_world_);
-    std::cout << "[LidarPipeline] Build Map Model with "
-              << kInitLidarAccumFrames << " lidar frames" << std::endl;
+    PointCloudXYZI::Ptr initial_map_cloud = cloud_init_world_;
+    PointCloudXYZI::Ptr fused_initial_map;
+    if (ivox_initial_voxel_size > 0.0) {
+        fused_initial_map.reset(new PointCloudXYZI);
+        pcl::VoxelGrid<PointType> initial_voxel;
+        const float leaf = static_cast<float>(ivox_initial_voxel_size);
+        initial_voxel.setLeafSize(leaf, leaf, leaf);
+        initial_voxel.setInputCloud(cloud_init_world_);
+        initial_voxel.filter(*fused_initial_map);
+        initial_map_cloud = fused_initial_map;
+    }
+    ikd_map_->add(initial_map_cloud);
+    std::cout << "[LidarPipeline] Build Point-LIO initial map with "
+              << initial_map_cloud->size() << " points from one full lidar frame, initial voxel="
+              << ivox_initial_voxel_size << " m" << std::endl;
 
     first_lidar_ = false;
-    init_lidar_accum_count_ = 0;
-    cloud_init_accum_lidar_->clear();
     shared_bufs_->popFrontLidarFrameSafe();
     return true; // handled
 }
@@ -177,7 +200,7 @@ bool LidarPipeline::handlePostElevatorRebuild(const FrameData& frame) {
         return true; // still accumulating
     }
 
-    applyVoxelFilter(rebuild_map_accum_lidar_, cloud_init_lidar_, blind);
+    applyVoxelFilter(rebuild_map_accum_lidar_, cloud_init_lidar_, blind, current_voxel_);
     cloud_init_world_ = estimator_->transLidar2World(*cloud_init_lidar_);
     if (map_world) map_world->clear();
     incremental_paths.clear();
@@ -253,9 +276,19 @@ bool LidarPipeline::undistortFrame(const FrameData& frame, State& lidar_end_stat
 // ===================== Step 5: Downsampling =====================
 
 void LidarPipeline::downsampleFrame(PointCloudXYZI::Ptr& cloud) {
+    if (!cloud) {
+        downsampled_cloud_->clear();
+        return;
+    }
+    const double target_points_per_frame = current_target_points_per_frame_;
     const std::size_t points_before = cloud->points.size();
+    const double voxel_used = frame_voxel_;
+    // Every update schedule uses the same continuous controller and the same
+    // single downsampled cloud for this scan.  Filtering even a tiny/empty
+    // scan is intentional: reusing the previous scan here would feed a stale
+    // LiDAR observation into the filter.
+    applyVoxelFilter(cloud, downsampled_cloud_, blind, voxel_used);
     if (cloud->points.size() > 10) {
-        applyVoxelFilter(cloud, downsampled_cloud_, blind);
         static double last_downsample_print_time = -1.0;
         if (last_downsample_print_time < 0.0 || (lidar_end_time - last_downsample_print_time) > 5.0) {
             std::cout << "[LidarPipeline] downsample: in=" << cloud->points.size()
@@ -265,26 +298,33 @@ void LidarPipeline::downsampleFrame(PointCloudXYZI::Ptr& cloud) {
     } else {
         static double last_no_downsample_print_time = -1.0;
         if (last_no_downsample_print_time < 0.0 || (lidar_end_time - last_no_downsample_print_time) > 5.0) {
-            LOG_INFO(Map, "[LidarPipeline] no downsample, reuse: " << downsampled_cloud_->points.size());
+            LOG_INFO(Map, "[LidarPipeline] sparse scan: in=" << cloud->points.size()
+                          << " out=" << downsampled_cloud_->points.size());
             last_no_downsample_print_time = lidar_end_time;
         }
     }
     const std::size_t points_after = downsampled_cloud_->points.size();
 
-    if (downsample_adaptive_enabled && !downsampled_cloud_->points.empty()) {
-        current_voxel_ = voxel_ctrl_.update(downsampled_cloud_->points.size());
+    if (!downsample_controller_updated_this_frame_) {
+        if (downsample_adaptive_enabled && !downsampled_cloud_->points.empty()) {
+            current_voxel_ = voxel_ctrl_.update(points_after);
+        }
+        downsample_controller_updated_this_frame_ = true;
     }
 
-    if (log_save_enable) {
+    if (log_save_enable && !downsample_logged_this_frame_) {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(6)
-            << lidar_end_time << "," << current_voxel_ << ","
+            << lidar_end_time << "," << voxel_used << ","
             << points_after << "," << points_before << ","
-            << current_target_points_per_frame_ << ","
-            << smoothed_lidar_dt_for_adaptive_;
+            << target_points_per_frame << ","
+            << smoothed_lidar_dt_for_adaptive_ << ","
+            << downsample_target_points << ","
+            << current_voxel_;
         runtimeLogger().writeLine(LogFileChannel::AdaptiveDownsample,
-                                  "time,voxel_size,points_after,points_before,target_points_frame,lidar_dt",
+                                  "time,voxel_size,points_after,points_before,target_points_frame,lidar_dt,target_points_per_second,next_voxel",
                                   oss.str(), 0, lidar_end_time);
+        downsample_logged_this_frame_ = true;
     }
 }
 
@@ -297,6 +337,262 @@ void LidarPipeline::runIeskfUpdate(State& post_state) {
     LIONode::lasermap_fov_segment();
     estimator_->UpdateByLidarIESKF(*downsampled_cloud_);
     post_state = estimator_->get_cur_state();
+}
+
+bool LidarPipeline::runImuGroupedUpdate(const FrameData& frame, State& post_state,
+                                        int over_range_samples) {
+    raw_clouds_lidar_ = frame.raw_cloud;
+    downsampleFrame(raw_clouds_lidar_);
+    if (!downsampled_cloud_ || downsampled_cloud_->empty()) return false;
+
+    std::stable_sort(downsampled_cloud_->points.begin(), downsampled_cloud_->points.end(),
+                     [](const PointType &lhs, const PointType &rhs) {
+                         return lhs.curvature < rhs.curvature;
+                     });
+    const auto pointTime = [&](const PointType &point) {
+        const double offset_s =
+                std::max(0.0, static_cast<double>(point.curvature) / 1000.0);
+        return std::clamp(frame.base_time + offset_s,
+                          frame.base_time, frame.end_time);
+    };
+
+    const bool have_committed_anchor = temporal_anchor_valid_;
+    const double committed_time = have_committed_anchor
+            ? temporal_anchor_state_.time
+            : pointTime(downsampled_cloud_->points.front());
+    const double last_point_time = pointTime(downsampled_cloud_->points.back());
+    if (last_point_time <= committed_time + 1e-9) {
+        LOG_WARN(Core, "IMU-group scan has no point newer than committed state: scan_last="
+                 << std::fixed << std::setprecision(9) << last_point_time
+                 << " committed=" << committed_time);
+        return false;
+    }
+
+    IMUProcess::ReplayCursor replay;
+    if (!imu_process_.beginReplay(committed_time, last_point_time, replay, true)) {
+        return false;
+    }
+    if (have_committed_anchor) {
+        replay.state = temporal_anchor_state_;
+        replay.state.time = committed_time;
+        replay.covariance_time = temporal_anchor_covariance_time_;
+    }
+    // A scan straddling the elevator exit can have an outside end state even
+    // though its committed anchor is still inside.  Never start the augmented
+    // IMU-group LiDAR path from such an anchor; use the normal frame path.
+    if (!imu_update_enable || replay.state.in_elevator ||
+        !imu_process_.activateOutputReplay(replay)) return false;
+
+    struct TimedPose {
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+        double time = 0.0;
+        Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
+        Eigen::Vector3d p = Eigen::Vector3d::Zero();
+    };
+    std::vector<TimedPose, Eigen::aligned_allocator<TimedPose>> pose_history;
+    pose_history.reserve(downsampled_cloud_->size() + 64);
+    pose_history.push_back({replay.state.time, replay.state.q, replay.state.p});
+
+    point_world_cloud_->clear();
+    point_world_cloud_->points.reserve(downsampled_cloud_->size());
+    point_insertion_neighbors_.clear();
+    point_insertion_neighbors_.reserve(downsampled_cloud_->size());
+    if (down_effect_cloud_lidar) down_effect_cloud_lidar->clear();
+    if (down_reject_cloud_lidar) down_reject_cloud_lidar->clear();
+
+    estimator_->state_vector_prior_.clear();
+    estimator_->state_vector_prior_.push_back(replay.state);
+    estimator_->set_cur_state(replay.state);
+    LIONode::lasermap_fov_segment();
+
+    const auto begin_tp = std::chrono::steady_clock::now();
+    const Eigen::Vector3d omega_before = replay.state.omg;
+    const Eigen::Vector3d acc_before = replay.state.acc;
+    std::size_t group_begin = 0;
+    int group_count = 0;
+    int matched_points = 0;
+    int updated_points = 0;
+    int skipped_overlap_points = 0;
+
+    while (group_begin < downsampled_cloud_->size() &&
+           pointTime(downsampled_cloud_->points[group_begin]) <=
+                   committed_time + 1e-9) {
+        ++group_begin;
+        ++skipped_overlap_points;
+    }
+
+    while (group_begin < downsampled_cloud_->size()) {
+        const double first_point_time =
+                pointTime(downsampled_cloud_->points[group_begin]);
+        double group_time = last_point_time;
+        for (const auto &sample : replay.samples) {
+            if (sample.time > replay.state.time + 1e-9 &&
+                sample.time >= first_point_time - 1e-9) {
+                group_time = std::min(sample.time, last_point_time);
+                break;
+            }
+        }
+
+        std::size_t group_end = group_begin;
+        while (group_end < downsampled_cloud_->size() &&
+               pointTime(downsampled_cloud_->points[group_end]) <=
+                       group_time + 1e-9) {
+            ++group_end;
+        }
+        if (group_end == group_begin) {
+            LOG_ERROR(Core, "failed to assign LiDAR point to IMU interval at t="
+                      << std::fixed << std::setprecision(9) << first_point_time);
+            return false;
+        }
+
+        std::vector<TimedPose, Eigen::aligned_allocator<TimedPose>> acquisition_poses;
+        acquisition_poses.reserve(group_end - group_begin);
+        for (std::size_t i = group_begin; i < group_end; ++i) {
+            const double stamp = pointTime(downsampled_cloud_->points[i]);
+            if (!imu_process_.propagateReplay(replay, stamp)) return false;
+            acquisition_poses.push_back({stamp, replay.state.q, replay.state.p});
+            pose_history.push_back(acquisition_poses.back());
+        }
+        if (!imu_process_.propagateReplay(replay, group_time)) return false;
+
+        point_group_cloud_->clear();
+        point_group_cloud_->points.reserve(group_end - group_begin);
+        for (std::size_t i = group_begin; i < group_end; ++i) {
+            const PointType &raw_point = downsampled_cloud_->points[i];
+            const TimedPose &acquisition = acquisition_poses[i - group_begin];
+            const Eigen::Vector3d p_l(raw_point.x, raw_point.y, raw_point.z);
+            const Eigen::Vector3d p_i = imu_R_lidar * p_l + imu_t_lidar;
+            const Eigen::Vector3d p_w = acquisition.q * p_i + acquisition.p;
+            const Eigen::Vector3d p_i_group =
+                    replay.state.q.inverse() * (p_w - replay.state.p);
+            const Eigen::Vector3d p_l_group =
+                    imu_R_lidar.transpose() * (p_i_group - imu_t_lidar);
+            PointType undistorted = raw_point;
+            undistorted.x = static_cast<float>(p_l_group.x());
+            undistorted.y = static_cast<float>(p_l_group.y());
+            undistorted.z = static_cast<float>(p_l_group.z());
+            undistorted.curvature = static_cast<float>(
+                    std::max(0.0, group_time - frame.base_time) * 1000.0);
+            point_group_cloud_->points.push_back(undistorted);
+        }
+        point_group_cloud_->width =
+                static_cast<std::uint32_t>(point_group_cloud_->size());
+        point_group_cloud_->height = 1;
+        point_group_cloud_->is_dense = true;
+
+        estimator_->set_cur_state(replay.state);
+        if (!replay.output_model_active || replay.state.in_elevator) {
+            LOG_WARN(Core, "IMU-group replay reached elevator mode; fallback to frame update at t="
+                     << std::fixed << std::setprecision(9) << group_time);
+            return false;
+        }
+        EskfEstimator::PointUpdateResult update =
+                estimator_->UpdateByLidarImuGroup(*point_group_cloud_);
+        matched_points += update.matched_points;
+        updated_points += update.updated_points;
+        point_insertion_neighbors_.insert(
+                point_insertion_neighbors_.end(),
+                std::make_move_iterator(update.insertion_neighbors.begin()),
+                std::make_move_iterator(update.insertion_neighbors.end()));
+        replay.state = estimator_->get_cur_state();
+        replay.state.time = group_time;
+        pose_history.push_back({group_time, replay.state.q, replay.state.p});
+
+        for (const PointType &point_lidar : point_group_cloud_->points) {
+            const Eigen::Vector3d p_l(point_lidar.x, point_lidar.y, point_lidar.z);
+            const Eigen::Vector3d p_i = imu_R_lidar * p_l + imu_t_lidar;
+            const Eigen::Vector3d p_w = replay.state.q * p_i + replay.state.p;
+            PointType point_world = point_lidar;
+            point_world.x = static_cast<float>(p_w.x());
+            point_world.y = static_cast<float>(p_w.y());
+            point_world.z = static_cast<float>(p_w.z());
+            point_world_cloud_->points.push_back(point_world);
+        }
+        ++group_count;
+        group_begin = group_end;
+    }
+
+    if (group_count == 0) return false;
+
+    post_state = replay.state;
+    imu_process_.deactivateOutputReplay(post_state);
+    pending_temporal_covariance_time_ = replay.covariance_time;
+    estimator_->set_cur_state(post_state);
+    estimator_->state_vector_post_.clear();
+    estimator_->state_vector_post_.push_back(post_state);
+
+    temporal_skipped_overlap_points_ +=
+            static_cast<std::uint64_t>(skipped_overlap_points);
+    temporal_processed_points_ +=
+            static_cast<std::uint64_t>(point_world_cloud_->size());
+    point_world_cloud_->width =
+            static_cast<std::uint32_t>(point_world_cloud_->size());
+    point_world_cloud_->height = 1;
+    point_world_cloud_->is_dense = true;
+
+    downsampled_cloud_->clear();
+    downsampled_cloud_->points.reserve(point_world_cloud_->size());
+    for (const PointType &point_world : point_world_cloud_->points) {
+        const Eigen::Vector3d p_w(point_world.x, point_world.y, point_world.z);
+        const Eigen::Vector3d p_i = post_state.q.inverse() * (p_w - post_state.p);
+        const Eigen::Vector3d p_l =
+                imu_R_lidar.transpose() * (p_i - imu_t_lidar);
+        PointType point_final = point_world;
+        point_final.x = static_cast<float>(p_l.x());
+        point_final.y = static_cast<float>(p_l.y());
+        point_final.z = static_cast<float>(p_l.z());
+        downsampled_cloud_->points.push_back(point_final);
+    }
+    downsampled_cloud_->width =
+            static_cast<std::uint32_t>(downsampled_cloud_->size());
+    downsampled_cloud_->height = 1;
+    downsampled_cloud_->is_dense = true;
+
+    const auto transform_cloud_to_group_end = [&](PointCloudXYZI &cloud) {
+        for (PointType &point : cloud.points) {
+            const double offset_s =
+                    std::max(0.0, static_cast<double>(point.curvature) / 1000.0);
+            const double stamp = std::clamp(frame.base_time + offset_s,
+                                            frame.base_time, frame.end_time);
+            const auto upper = std::upper_bound(
+                    pose_history.begin(), pose_history.end(), stamp + 1e-9,
+                    [](double time, const TimedPose &pose) {
+                        return time < pose.time;
+                    });
+            const TimedPose &pose = upper == pose_history.begin()
+                    ? pose_history.front() : *(upper - 1);
+            const Eigen::Vector3d p_l(point.x, point.y, point.z);
+            const Eigen::Vector3d p_i = imu_R_lidar * p_l + imu_t_lidar;
+            const Eigen::Vector3d p_w = pose.q * p_i + pose.p;
+            const Eigen::Vector3d p_i_end =
+                    post_state.q.inverse() * (p_w - post_state.p);
+            const Eigen::Vector3d p_l_end =
+                    imu_R_lidar.transpose() * (p_i_end - imu_t_lidar);
+            point.x = static_cast<float>(p_l_end.x());
+            point.y = static_cast<float>(p_l_end.y());
+            point.z = static_cast<float>(p_l_end.z());
+        }
+    };
+
+    PointCloudXYZI::Ptr published_cloud(new PointCloudXYZI(*frame.raw_cloud));
+    transform_cloud_to_group_end(*published_cloud);
+    if (down_effect_cloud_lidar) transform_cloud_to_group_end(*down_effect_cloud_lidar);
+    if (down_reject_cloud_lidar) transform_cloud_to_group_end(*down_reject_cloud_lidar);
+    raw_clouds_lidar_ = published_cloud;
+
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - begin_tp).count();
+    LOG_WARN(Core, "IMU-group LiDAR update: over_range_samples="
+             << over_range_samples << " groups=" << group_count
+             << " points=" << point_world_cloud_->size()
+             << " matched=" << matched_points
+             << " updated=" << updated_points
+             << " skipped_overlap=" << skipped_overlap_points
+             << " domega=" << (post_state.omg - omega_before).norm()
+             << " dacc=" << (post_state.acc - acc_before).norm()
+             << " filter_time=" << std::fixed << std::setprecision(9)
+             << post_state.time << " elapsed_ms=" << elapsed_ms);
+    return true;
 }
 
 // ===================== Step 7: Elevator stop handling =====================
@@ -398,7 +694,7 @@ void LidarPipeline::handleElevatorExit(State& post_state) {
                           << " frames=" << elevator_rebuild_map_on_exit_frames
                           << " min_points=" << elevator_rebuild_map_on_exit_min_points);
     } else {
-        applyVoxelFilter(raw_clouds_lidar_, cloud_init_lidar_, blind);
+        applyVoxelFilter(raw_clouds_lidar_, cloud_init_lidar_, blind, current_voxel_);
         cloud_init_world_ = estimator_->transLidar2World(*cloud_init_lidar_);
         ikd_map_->add(cloud_init_world_);
     }
@@ -406,17 +702,32 @@ void LidarPipeline::handleElevatorExit(State& post_state) {
 
 // ===================== Step 9: Commit frame (state update, map, pop) =====================
 
-void LidarPipeline::commitFrame(const FrameData& frame, const State& post_state) {
+void LidarPipeline::commitFrame(const FrameData& frame, const State& post_state,
+                                bool temporal_update_done) {
     lidar_end_time = frame.end_time;
 
-    imu_process_.set_state_at_t(const_cast<State&>(post_state), frame.end_time);
+    State committed_state = post_state;
+    const double state_commit_time = temporal_update_done
+            ? post_state.time
+            : frame.end_time;
+    committed_state.time = state_commit_time;
+    imu_process_.set_state_at_t(
+            committed_state, state_commit_time,
+            temporal_update_done ? pending_temporal_covariance_time_ : state_commit_time);
+    // Keep the latest committed posterior as the causal anchor even when this
+    // scan used the ordinary frame update.  A later on-demand temporal update
+    // must never restart from an overlapping raw scan time before this state.
+    temporal_anchor_state_ = committed_state;
+    temporal_anchor_covariance_time_ = temporal_update_done
+            ? pending_temporal_covariance_time_ : state_commit_time;
+    temporal_anchor_valid_ = true;
 
     lio_ros::Bool msg;
     msg.data = post_state.in_elevator;
     ele_state_pub_.publish(msg);
 
     lio_ros::ElevatorState elevator_msg;
-    elevator_msg.header.stamp = get_ros_time(frame.end_time);
+    elevator_msg.header.stamp = get_ros_time(state_commit_time);
     elevator_msg.header.frame_id = "world";
     elevator_msg.in_elevator = post_state.in_elevator;
     elevator_msg.displacement = post_state.z;
@@ -427,7 +738,18 @@ void LidarPipeline::commitFrame(const FrameData& frame, const State& post_state)
     shared_bufs_->popFrontLidarFrameSafe();
 
     if (!rebuild_map_pending_) {
-        LIONode::map_incremental(*downsampled_cloud_);
+        if (temporal_update_done && !relocation_enable && ikd_map_) {
+            // Transform with the final committed pose, but preserve the
+            // insertion decision based on the neighbors seen by each point's
+            // measurement update.
+            estimator_->set_cur_state(post_state);
+            PointCloudXYZI::Ptr world_cloud =
+                    estimator_->transLidar2World(*downsampled_cloud_);
+            ikd_map_->addWithMeasurementNeighbors(
+                    world_cloud, point_insertion_neighbors_);
+        } else {
+            LIONode::map_incremental(*downsampled_cloud_);
+        }
     }
 }
 
@@ -480,28 +802,43 @@ LidarPipeline::Result LidarPipeline::process() {
 
     // [5] Resolve elevator state
     State lidar_end_state;
-    bool in_elevator;
+    bool in_elevator = false;
     resolveFrameState(frame, lidar_end_state, in_elevator);
 
-    // [6] Undistort
+    // [6] Outside elevator mode, an over-range scan switches to one accumulated
+    // LiDAR update per adjacent IMU interval. Elevator scans always remain on
+    // the original frame-wise update path.
     raw_clouds_lidar_ = frame.raw_cloud;
-    if (in_elevator && !exit_from_elevator_) {
-        // Skip undistortion in elevator mode
-    } else {
-        if (!undistortFrame(frame, lidar_end_state, raw_clouds_lidar_)) {
+    State post_state = lidar_end_state;
+    int over_range_samples = 0;
+    const bool request_imu_group_update = imu_update_enable &&
+            !lidar_end_state.in_elevator &&
+            imu_process_.hasSaturationBetween(
+                    frame.base_time, frame.end_time, &over_range_samples);
+    bool imu_group_update_done = false;
+    if (request_imu_group_update) {
+        imu_group_update_done = runImuGroupedUpdate(
+                frame, post_state, over_range_samples);
+        if (!imu_group_update_done) {
+            LOG_WARN(Core, "IMU-group replay unavailable; fallback to frame update at t="
+                     << frame.end_time);
+        }
+    }
+
+    if (!imu_group_update_done) {
+        // Preserve the original frame-mode preprocessing behavior when the
+        // grouped update is disabled, unnecessary, or cannot be replayed.
+        if (in_elevator && !exit_from_elevator_) {
+            // Legacy frame mode skips undistortion while the cabin is moving.
+        } else if (!undistortFrame(frame, lidar_end_state, raw_clouds_lidar_)) {
             shared_bufs_->popFrontLidarFrameSafe();
             FSM::dispatch(FSM::Event::LidarEnd);
             std::cerr << "[LidarPipeline] IMU Data Not Enough" << std::endl;
             return result;
         }
+        downsampleFrame(raw_clouds_lidar_);
+        runIeskfUpdate(post_state);
     }
-
-    // [7] Downsample
-    downsampleFrame(raw_clouds_lidar_);
-
-    // [8] IESKF update
-    State post_state = lidar_end_state;
-    runIeskfUpdate(post_state);
 
     // [9] Elevator stop handling
     handleElevatorStop(post_state);
@@ -510,7 +847,7 @@ LidarPipeline::Result LidarPipeline::process() {
     handleElevatorExit(post_state);
 
     // [11] Commit frame state, update map, pop buffer
-    commitFrame(frame, post_state);
+    commitFrame(frame, post_state, imu_group_update_done);
 
     // [12] Return results for caller to publish
     result.processed = true;

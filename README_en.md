@@ -50,7 +50,45 @@ Conventional LIO assumes an inertial navigation frame. Inside a moving elevator 
 
 ![Elevator-LIO system overview](docs/images/system_overview.png)
 
-The system processes IMU and LiDAR data in timestamp order, including static IMU initialization, adaptive downsampling, mode-dependent propagation, IESKF LiDAR update, optional elevator-exit update, and incremental ikd-tree mapping.
+The system processes IMU and LiDAR data in timestamp order, including static IMU initialization, adaptive downsampling, mode-dependent propagation, LiDAR update, optional elevator-exit update, and incremental ikd-tree mapping. Normal scans use the original frame-wise IESKF. With the IMU update enhancement enabled, non-elevator scans containing an over-range sample are automatically undistorted and updated in adjacent IMU-time intervals.
+
+### Temporal LiDAR Updates and IMU Range Protection
+
+`estimator.imu_update.enable` is the master switch for this algorithm group, but enabling it does not
+change the normal filter path. Static initialization, live ring-buffer propagation, ordinary
+undistortion, and frame-wise IESKF updates keep the original input-IMU model. Only a non-elevator scan
+containing an over-range sample creates a local replay from the previous LiDAR posterior. During that
+replay, the current IMU is represented by `omg + bw` and `acc + ba`, and points are undistorted and
+updated in adjacent IMU-time intervals. At the end, the pose, velocity, bias, and gravity posterior is
+kept while cross covariance from the local `omg/acc` substate is removed before returning to input
+propagation. Therefore, when no sample reaches the configured limit, `enable: true` and `enable: false`
+use the same localization computation path. Elevator scans never activate this replay.
+
+```yaml
+estimator:
+  imu_update:
+    enable: true
+    saturation:
+      gyro_limit_rad_s: 35.0
+      accel_limit_g: 5.0
+      process_noise_scale: 1000.0
+    output_state:
+      velocity_process_variance: 20.0
+      angular_rate_process_variance: 1000.0
+      acceleration_process_variance: 500.0
+      gyro_bias_process_variance: 1.0e-4
+      accel_bias_process_variance: 1.0e-4
+      gyro_measurement_variance: 0.1
+      accel_measurement_variance: 0.1
+    lidar_measurement_variance: 1.0e-2
+```
+
+Range detection is estimator logic, so its thresholds are grouped with state noise, IMU measurement
+noise, and grouped-LiDAR measurement variance under `estimator.imu_update`, rather than under
+`sensors/livox.yaml`. Detection is per axis and uses each configured threshold directly, with no hidden
+ratio. Finite over-range values still participate in the `omg/acc` measurement update, but cannot
+trigger an IMU-group LiDAR update inside an elevator. Only NaN/Inf axes are replaced and omitted, and
+those samples do not enter the elevator-stop state machine.
 
 ### Elevator Mode Management
 
@@ -104,6 +142,13 @@ Useful features include:
 - **Simple relocation mode**: load a PCD map, start near the map origin, and run localization against it.
 - **Covariance visualization**: can be enabled under `yaml/logging` for debugging.
 - **High-frequency odometry output**: can be enabled under `yaml/runtime` to publish IMU-preintegrated poses for downstream applications.
+- **On-demand IMU-group updates**: scans containing an over-range sample are undistorted and updated
+  in adjacent IMU-time intervals outside elevator mode; elevators retain frame-wise LiDAR updates.
+- **Point-LIO-style augmented IMU state**: angular rate and specific force are explicit states only
+  inside a local over-range replay outside elevator mode; untriggered scans retain the original
+  input-IMU model.
+- **Per-axis IMU range protection**: finite over-range values remain measurements and trigger grouped
+  updates; only NaN/Inf axes are omitted. Other axes remain unaffected.
 
 Unlike mainstream LIO systems, Elevator-LIO does not rely on an explicit measurement package abstraction. It follows an "update when data arrives" design, which is more convenient for multi-sensor fusion. The tradeoff is that the state machine must poll at a high rate to detect incoming data.
 
@@ -266,7 +311,7 @@ Detailed configuration notes are in [yaml/README.md](yaml/README.md).
 
 Key configuration examples:
 
-- **Downsampling**. On embedded devices or slow platforms, increase `point_filter_num`, reduce `adaptive.target_points`, or increase `adaptive.min_voxel`:
+- **Downsampling**. One continuous adaptive voxel controller tracks every scan. Frame-wise and IMU-group updates share the same target rate and the same downsampled cloud. On embedded devices or slow platforms, increase `point_filter_num`, reduce `adaptive.target_points`, or increase `adaptive.min_voxel`:
 
 ```yaml
 downsample:
@@ -280,7 +325,7 @@ downsample:
   filter_size: 0.1
   adaptive:
     enable: true
-    target_points: 20000
+    target_points: 20000 # shared by both LiDAR update paths, about 2000 points/frame at 10 Hz
     alpha: 1.2
     min_voxel: 0.05
     max_voxel: 0.8

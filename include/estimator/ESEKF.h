@@ -41,9 +41,20 @@ public:
         std::string reason;
     };
 
+    struct PointUpdateResult {
+        int input_points = 0;
+        int matched_points = 0;
+        int updated_points = 0;
+        double max_abs_residual = 0.0;
+        // Point-LIO reuses the neighbors found while evaluating each LiDAR
+        // measurement when deciding whether that point should enter the map.
+        std::vector<PointVector> insertion_neighbors;
+    };
+
     EskfEstimator();
     ~EskfEstimator();
     void UpdateByLidarIESKF(PointCloudXYZI &Dedistort_clouds_lidar);
+    PointUpdateResult UpdateByLidarImuGroup(PointCloudXYZI &points_lidar);
     ZIcpResult matchZByIcpAgainstIkdTree(const PointCloudXYZI &clouds_lidar,
                                          const State &initial_state) const;
     void UpdateByWheel(std::deque<WheelData> buf);

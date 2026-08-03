@@ -30,9 +30,13 @@ void LIONode::save_odometry(State state, double time, const string& save_path) {
         << state.z << "," << state.vz << "," << state.az << ","
         << state.ba(0) << "," << state.ba(1) << "," << state.ba(2) <<  ","
         << state.v(0) << "," << state.v(1) << "," << state.v(2) << ","
-        << state.g(0) << "," << state.g(1) << "," << state.g(2);
+        << state.g(0) << "," << state.g(1) << "," << state.g(2) << ","
+        << state.bw(0) << "," << state.bw(1) << "," << state.bw(2) << ","
+        << state.omg(0) << "," << state.omg(1) << "," << state.omg(2) << ","
+        << state.acc(0) << "," << state.acc(1) << "," << state.acc(2);
     runtimeLogger().writeLine(channel,
-                              "time,x,y,z,qx,qy,qz,qw,Ez,Evz,Eaz,ba_x,ba_y,ba_z,vx,vy,vz,gx,gy,gz",
+                              "time,x,y,z,qx,qy,qz,qw,Ez,Evz,Eaz,ba_x,ba_y,ba_z,vx,vy,vz,gx,gy,gz,"
+                              "bw_x,bw_y,bw_z,omg_x,omg_y,omg_z,acc_x,acc_y,acc_z",
                               oss.str(), 0, time);
 }
 

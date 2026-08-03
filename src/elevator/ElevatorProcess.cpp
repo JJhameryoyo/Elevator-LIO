@@ -44,6 +44,16 @@ void ElevatorProcess::processDoorDetector(const PointCloudXYZI& cloud,
 
     door_low_distance_active_ = door_closed_like;
 
+    // A manual trigger and an automatic door trigger must arm the detector in
+    // exactly the same way.  Keep it latched throughout the elevator segment;
+    // after exit an open-door observation below clears the latch before a new
+    // closed-door interval is allowed to trigger another segment.
+    if (state.in_elevator || ELEVATOR_TRIGGER) {
+        door_closed_triggered_ = true;
+        door_low_dist_start_time_ = -1.0;
+        return;
+    }
+
     if (!state.in_elevator && !ELEVATOR_TRIGGER) {
         if ((timestamp - door_last_enter_trigger_time_) < elevator_door_cooldown_time) return;
 

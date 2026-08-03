@@ -52,7 +52,42 @@ Elevator-LIO 是面向电梯非惯性运动和跨楼层定位的 LiDAR-惯性里
 
 ![Elevator-LIO 系统总览](docs/images/system_overview.png)
 
-系统按照时间顺序处理 IMU 和 LiDAR 数据，依次完成静态 IMU 初始化、自适应降采样、模式相关传播、IESKF LiDAR 更新、可能的退出电梯更新和增量 ikd-Tree 建图。
+系统按照时间顺序处理 IMU 和 LiDAR 数据，依次完成静态 IMU 初始化、自适应降采样、模式相关传播、LiDAR 更新、可能的退出电梯更新和增量 ikd-Tree 建图。正常扫描使用原始逐帧 IESKF；启用 IMU 更新增强后，非电梯模式下含超量程样本的扫描自动按相邻 IMU 时刻分组去畸变和更新。
+
+### 时序 LiDAR 更新与 IMU 量程保护
+
+`estimator.imu_update.enable` 是这一组算法的总开关。开启并不改变平时的滤波器：静态
+初始化、实时 IMU 环形缓冲传播、普通去畸变和逐帧 IESKF 均继续使用原始 input IMU
+模型。只有非电梯扫描内出现超量程样本时，才从上一个 LiDAR 后验建立局部 replay，
+将当前 IMU 映射为 `omg + bw` 和 `acc + ba`，再把降采样点按相邻 IMU 时间区间分组去畸变
+和更新。分组结束后保留位姿、速度、bias 和重力后验，清除局部 `omg/acc` 与常规状态的
+交叉协方差，然后回到 input 传播。因此如果全程没有达到量程阈值，`enable: true` 与
+`enable: false` 的定位计算路径相同。电梯内不启动该 replay，仍使用原始逻辑。
+
+```yaml
+estimator:
+  imu_update:
+    enable: true
+    saturation:
+      gyro_limit_rad_s: 35.0
+      accel_limit_g: 5.0
+      process_noise_scale: 1000.0
+    output_state:
+      velocity_process_variance: 20.0
+      angular_rate_process_variance: 1000.0
+      acceleration_process_variance: 500.0
+      gyro_bias_process_variance: 1.0e-4
+      accel_bias_process_variance: 1.0e-4
+      gyro_measurement_variance: 0.1
+      accel_measurement_variance: 0.1
+    lidar_measurement_variance: 1.0e-2
+```
+
+量程检测是估计器算法的一部分，因此与状态噪声、IMU 量测噪声及分组 LiDAR 量测方差统一
+放在运行配置的 `estimator.imu_update` 下，而不放在 `sensors/livox.yaml`。检测逐轴进行，
+阈值直接使用配置值，不乘额外比例；有限超限值仍参与 `omg/acc` 量测，但电梯内不会
+触发逐 IMU 分组 LiDAR 更新。NaN/Inf 轴才会被替换并从量测中屏蔽，也不会参与电梯停靠
+状态机。
 
 ### 电梯模式管理
 
@@ -105,6 +140,10 @@ Elevator-LIO 的设计遵循开箱即用的原则，集成了许多便于使用�
 - **简单的重定位功能**：支持加载 PCD 地图，然后在原点启动并运行重定位
 - **协方差矩阵可视化**：可在 `yaml/logging` 中打开，方便调试
 - **高频输出**：可在 `yaml/runtime` 中打开，将 IMU 预积分位姿也输出出来，方便下游应用
+- **按需逐 IMU 分组更新**：含超量程样本的扫描按相邻 IMU 时间区间去畸变并更新，
+  仅在非电梯模式启用；电梯内保持原始逐帧 LiDAR 更新
+- **Point-LIO 风格 IMU 扩增状态**：仅在非电梯扫描超量程时的局部 replay 内显式
+  估计角速度和比力；未触发时保持原始 input IMU 模型
 
 不同于主流 LIO，Elevator-LIO 没有显式打包概念，遵循“谁来谁更新”的设计理念，在框架上更适合多传感器融合；但这也带来了额外开销：状态机需要以较高频率轮询并检测是否有数据输入。
 
@@ -269,7 +308,8 @@ logging_config: "logging/default.yaml"
 
 部分关键配置：
 
-- **降采样参数**。如在嵌入式设备上无法实时运行，可以增大 `point_filter_num`、降低
+- **降采样参数**。一个连续的自适应体素控制器跟踪所有扫描，逐帧和逐 IMU 分组更新共用同一个目标点率和同一份降采样点云。
+  如在嵌入式设备上无法实时运行，可以增大 `point_filter_num`、降低
   `adaptive.target_points`，或增大 `adaptive.min_voxel`：
 
 ```yaml
@@ -284,7 +324,7 @@ downsample:
   filter_size: 0.1 # 固定模式的体素大小；自适应模式下的初始体素大小
   adaptive:
     enable: true # 启用自适应体素降采样
-    target_points: 20000 # 目标每秒点数（程序会按帧时间折算）
+    target_points: 20000 # 所有 LiDAR 更新共用，10 Hz 时约 2000 点/帧
     alpha: 1.2 # 幂律调节指数
     min_voxel: 0.05 # 最小体素大小
     max_voxel: 0.8 # 最大体素大小

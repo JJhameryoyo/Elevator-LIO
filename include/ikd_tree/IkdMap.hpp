@@ -13,7 +13,9 @@
 #include <cmath>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
@@ -43,11 +45,17 @@ public:
         double local_map_move_scale = 0.9;
         double cache_quantization_scale = 100.0;
         int cache_key_axis_bits = 21;
+        std::string backend = "ikdtree";
+        double ivox_grid_resolution = 2.0;
+        int ivox_nearby_type = 6;
+        double ivox_max_search_range = 5.0;
+        double ivox_insert_voxel_size = 0.4;
     };
 
     explicit IkdMap(const Config& config = Config(), KDTreeType* external_tree = nullptr)
             : config_(config),
               tree_ptr_(external_tree != nullptr ? external_tree : &owned_tree_),
+              use_ivox_(config_.backend == "ivox"),
               map_resolution_(config_.default_map_resolution),
               cube_len_(config_.local_map_cube_len),
               det_range_(config_.local_map_detect_range),
@@ -71,6 +79,11 @@ public:
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_) {
+            return;
+        }
+
+        if (use_ivox_) {
+            addIvoxLocked(*cloud);
             return;
         }
 
@@ -142,8 +155,58 @@ public:
         nearest_cache_.clear(); // 地图已更新，旧近邻结果失效
     }
 
+    // Point-LIO map insertion path: reuse the neighbors obtained by the
+    // LiDAR measurement model instead of querying the (post-update) point
+    // again at frame commit time.
+    void addWithMeasurementNeighbors(
+            const PointCloudConstPtr& cloud,
+            const std::vector<KDPointVector>& measurement_neighbors) {
+        if (!cloud || cloud->empty()) return;
+        if (!use_ivox_ || measurement_neighbors.size() != cloud->size()) {
+            add(cloud);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_) return;
+        if (!ivox_has_initial_map_) {
+            KDPointVector initial_points;
+            initial_points.reserve(cloud->size());
+            for (const auto& point : cloud->points) initial_points.push_back(point);
+            insertIvoxPoints(initial_points);
+            ivox_has_initial_map_ = true;
+            return;
+        }
+
+        KDPointVector points_to_add;
+        points_to_add.reserve(cloud->size());
+        const double voxel = config_.ivox_insert_voxel_size;
+        const double half = 0.5 * voxel;
+        for (std::size_t i = 0; i < cloud->size(); ++i) {
+            const PointType& point = cloud->points[i];
+            const PointType center = voxelCenter(point, voxel, half);
+            bool need_add = true;
+            for (const auto& near : measurement_neighbors[i]) {
+                if (std::abs(near.x - center.x) < half &&
+                    std::abs(near.y - center.y) < half &&
+                    std::abs(near.z - center.z) < half) {
+                    need_add = false;
+                    break;
+                }
+            }
+            if (need_add) points_to_add.push_back(point);
+        }
+        insertIvoxPoints(points_to_add);
+    }
+
     void reset() {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (use_ivox_) {
+            ivox_grids_.clear();
+            ivox_point_count_ = 0;
+            ivox_has_initial_map_ = false;
+            return;
+        }
         KDPointVector empty_points;
         tree_ptr_->Build(empty_points);
         nearest_cache_.clear();
@@ -156,6 +219,10 @@ public:
         if (!initialized_) {
             return;
         }
+        // Point-LIO's IVox retains grids through its capacity/LRU policy rather
+        // than the ikd-tree moving-cube deletion scheme.  The regression bags
+        // are far below that capacity, so no spatial deletion is needed here.
+        if (use_ivox_) return;
 
         if (!localmap_initialized_) {
             // 以 world 系当前位置为中心，初始化局部地图包围盒（长宽高均为 cube_len_）
@@ -213,7 +280,144 @@ public:
         }
     }
 
+    bool searchKnn(const PointType& point, int k, KDPointVector& points,
+                   std::vector<float>& distance_sq) const {
+        if (use_ivox_) return searchIvox(point, k, points, distance_sq);
+        tree_ptr_->Nearest_Search(point, k, points, distance_sq);
+        return static_cast<int>(points.size()) >= k;
+    }
+
+    bool empty() const {
+        return use_ivox_ ? ivox_point_count_ == 0 : tree_ptr_->Root_Node == nullptr;
+    }
+
+    bool usesIvox() const { return use_ivox_; }
+
 private:
+    struct GridKey {
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        bool operator==(const GridKey& other) const {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+
+    struct GridKeyHash {
+        std::size_t operator()(const GridKey& key) const {
+            std::size_t seed = std::hash<int>{}(key.x);
+            seed ^= std::hash<int>{}(key.y) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+            seed ^= std::hash<int>{}(key.z) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+            return seed;
+        }
+    };
+
+    GridKey ivoxKey(const PointType& point) const {
+        const double inv = 1.0 / std::max(1e-6, config_.ivox_grid_resolution);
+        return {static_cast<int>(std::floor(point.x * inv)),
+                static_cast<int>(std::floor(point.y * inv)),
+                static_cast<int>(std::floor(point.z * inv))};
+    }
+
+    bool includeNearbyOffset(int dx, int dy, int dz) const {
+        const int nonzero = (dx != 0) + (dy != 0) + (dz != 0);
+        if (config_.ivox_nearby_type == 6) return nonzero <= 1;
+        if (config_.ivox_nearby_type == 18) return nonzero <= 2;
+        return true;
+    }
+
+    bool searchIvox(const PointType& point, int k, KDPointVector& points,
+                    std::vector<float>& distance_sq) const {
+        points.clear();
+        distance_sq.clear();
+        if (k <= 0 || ivox_grids_.empty()) return false;
+
+        struct Candidate {
+            float distance_sq;
+            PointType point;
+        };
+        std::vector<Candidate> candidates;
+        const GridKey center = ivoxKey(point);
+        const float max_distance_sq = static_cast<float>(
+                config_.ivox_max_search_range * config_.ivox_max_search_range);
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (!includeNearbyOffset(dx, dy, dz)) continue;
+                    const auto it = ivox_grids_.find({center.x + dx, center.y + dy, center.z + dz});
+                    if (it == ivox_grids_.end()) continue;
+                    for (const auto& candidate_point : it->second) {
+                        const float d2 = dist2(point, candidate_point);
+                        if (d2 < max_distance_sq) candidates.push_back({d2, candidate_point});
+                    }
+                }
+            }
+        }
+        if (candidates.empty()) return false;
+
+        const size_t keep = std::min(static_cast<size_t>(k), candidates.size());
+        if (candidates.size() > keep) {
+            std::nth_element(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(keep),
+                             candidates.end(),
+                             [](const Candidate& a, const Candidate& b) {
+                                 return a.distance_sq < b.distance_sq;
+                             });
+            candidates.resize(keep);
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& b) {
+                      return a.distance_sq < b.distance_sq;
+                  });
+        points.reserve(keep);
+        distance_sq.reserve(keep);
+        for (const auto& candidate : candidates) {
+            points.push_back(candidate.point);
+            distance_sq.push_back(candidate.distance_sq);
+        }
+        return static_cast<int>(points.size()) >= k;
+    }
+
+    void insertIvoxPoints(const KDPointVector& points) {
+        for (const auto& point : points) {
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) continue;
+            ivox_grids_[ivoxKey(point)].push_back(point);
+            ++ivox_point_count_;
+        }
+    }
+
+    void addIvoxLocked(const pcl::PointCloud<PointType>& cloud) {
+        KDPointVector input;
+        input.reserve(cloud.size());
+        for (const auto& point : cloud.points) input.push_back(point);
+        if (!ivox_has_initial_map_) {
+            insertIvoxPoints(input);
+            ivox_has_initial_map_ = true;
+            return;
+        }
+
+        KDPointVector points_to_add;
+        points_to_add.reserve(input.size());
+        const double voxel = config_.ivox_insert_voxel_size;
+        const double half = 0.5 * voxel;
+        for (const auto& point : input) {
+            KDPointVector nearest_points;
+            std::vector<float> nearest_distance_sq;
+            searchIvox(point, std::max(1, config_.knn), nearest_points, nearest_distance_sq);
+            const PointType center = voxelCenter(point, voxel, half);
+            bool need_add = true;
+            for (const auto& near : nearest_points) {
+                if (std::abs(near.x - center.x) < half &&
+                    std::abs(near.y - center.y) < half &&
+                    std::abs(near.z - center.z) < half) {
+                    need_add = false;
+                    break;
+                }
+            }
+            if (need_add) points_to_add.push_back(point);
+        }
+        insertIvoxPoints(points_to_add);
+    }
+
     NeighborCacheEntry nearest(const PointType& point, int k) const {
         const std::uint64_t cache_key = key(point);
         const auto it = nearest_cache_.find(cache_key);
@@ -261,6 +465,7 @@ private:
     Config config_;
     mutable KDTreeType owned_tree_;
     KDTreeType* tree_ptr_ = nullptr;
+    bool use_ivox_ = false;
     bool initialized_ = false;
     double map_resolution_;
     bool localmap_initialized_ = false;
@@ -269,4 +474,7 @@ private:
     double det_range_;
     double mov_threshold_;
     mutable std::unordered_map<std::uint64_t, NeighborCacheEntry> nearest_cache_;
+    std::unordered_map<GridKey, KDPointVector, GridKeyHash> ivox_grids_;
+    size_t ivox_point_count_ = 0;
+    bool ivox_has_initial_map_ = false;
 };

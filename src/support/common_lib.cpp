@@ -206,11 +206,17 @@ Eigen::Vector2d box_corner_y(-0.3, 0.3);
 Eigen::Vector2d box_corner_z(-0.4, 0.4);
 float filter_size = 0.5; // 点云降采样大小（ikdtree大小），默认值0.5
 bool downsample_adaptive_enabled = false; // 是否启用变体素大小降采样
-double downsample_target_points = 2500.0; // 自适应体素的目标每秒点数
+double downsample_target_points = 20000.0; // 所有 LiDAR 更新共用的目标每秒点数
 double downsample_alpha = 1.5;
 double downsample_min_voxel = 0.02;
 double downsample_max_voxel = 0.8;
 double local_map_cube_len = 1500.0;
+string map_type = "ikdtree";
+double ivox_grid_resolution = 2.0;
+int ivox_nearby_type = 6;
+double ivox_max_search_range = 5.0;
+double ivox_insert_voxel_size = 0.4;
+double ivox_initial_voxel_size = 0.0;
 
 bool global_map_save_enable; // 是否启用点云保存
 int every_n_frame_save; // 每隔多少帧保存一次单帧地图，-1表示不保存
@@ -236,6 +242,15 @@ string ikdtree_topic_name; // world系 ikdtree 发布的话题名
 string odom_imu_topic_name; // imu位姿的话题名
 string odom_vehicle_topic_name; // body位姿的话题名
 string lidar_update_mode = "pose6";
+bool imu_update_enable = false;
+double output_imu_velocity_process_variance = 20.0;
+double output_imu_angular_rate_process_variance = 1000.0;
+double output_imu_acceleration_process_variance = 500.0;
+double output_imu_gyro_bias_process_variance = 1e-4;
+double output_imu_accel_bias_process_variance = 1e-4;
+double output_imu_gyro_measurement_variance = 0.1;
+double output_imu_accel_measurement_variance = 0.1;
+double imu_update_lidar_measurement_variance = 1e-2;
 bool online_gravity_estimation_enable = false;
 int lidar_ieskf_max_iterations = 4;
 double lidar_ieskf_converge_rot_rad = 1e-3;
@@ -243,12 +258,16 @@ double lidar_ieskf_converge_pos_m = 1e-3;
 double lidar_ieskf_rematch_rot_rad = 2e-3;
 double lidar_ieskf_rematch_pos_m = 2e-3;
 int ikdtree_match_knn = 5;
-double ikdtree_plane_fit_rmse_threshold = 0.05;
+double ikdtree_plane_fit_rmse_threshold = 0.1;
 double ikdtree_neighbor_max_dist2 = 5.0;
-string ikdtree_gate_mode = "linear_range";
+string ikdtree_gate_mode = "pointlio";
 double ikdtree_score_min = 0.95;
+double ikdtree_pointlio_match_s = 81.0;
 double ikdtree_match_thresh_base = 0.03;
 double ikdtree_match_thresh_scale = 0.01;
+double imu_saturation_gyro_limit_rad_s = 35.0;
+double imu_saturation_accel_limit_g = 2.0;
+double imu_saturation_process_noise_scale = 1000.0;
 bool relocation_enable; // 是否启用重定位
 string pcd_load_name; // 重定位时，加载的点云文件名
 
@@ -379,6 +398,7 @@ void load_lio_yaml(const std::vector<string>& file_names) {
         } else {
             ConfigPrinter::printError("adaptive.target_points");
         }
+        downsample_target_points = std::max(1.0, downsample_target_points);
         if (reader.read("downsample.adaptive.alpha", downsample_alpha)) {
             ConfigPrinter::printItem("adaptive.alpha", downsample_alpha);
         } else {
@@ -526,7 +546,31 @@ void load_lio_yaml(const std::vector<string>& file_names) {
 
         /******** map ********/
         ConfigPrinter::printSubHeader("Map");
-        ConfigPrinter::printItem("map_type", "ikdtree");
+        readYamlOrDefault(reader, "map.type", map_type);
+        std::transform(map_type.begin(), map_type.end(), map_type.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (map_type != "ikdtree" && map_type != "ivox") {
+            LOG_WARN(Core, "unsupported map.type='" << map_type << "', fallback to ikdtree");
+            map_type = "ikdtree";
+        }
+        readYamlOrDefault(reader, "map.ivox.grid_resolution", ivox_grid_resolution);
+        readYamlOrDefault(reader, "map.ivox.nearby_type", ivox_nearby_type);
+        readYamlOrDefault(reader, "map.ivox.max_search_range", ivox_max_search_range);
+        readYamlOrDefault(reader, "map.ivox.insert_voxel_size", ivox_insert_voxel_size);
+        readYamlOrDefault(reader, "map.ivox.initial_voxel_size", ivox_initial_voxel_size);
+        ivox_grid_resolution = std::max(1e-3, ivox_grid_resolution);
+        if (ivox_nearby_type != 6 && ivox_nearby_type != 18 && ivox_nearby_type != 26) {
+            ivox_nearby_type = 6;
+        }
+        ivox_max_search_range = std::max(1e-3, ivox_max_search_range);
+        ivox_insert_voxel_size = std::max(1e-3, ivox_insert_voxel_size);
+        ivox_initial_voxel_size = std::max(0.0, ivox_initial_voxel_size);
+        ConfigPrinter::printItem("map_type", map_type);
+        ConfigPrinter::printItem("ivox.grid_resolution", ivox_grid_resolution);
+        ConfigPrinter::printItem("ivox.nearby_type", ivox_nearby_type);
+        ConfigPrinter::printItem("ivox.max_search_range", ivox_max_search_range);
+        ConfigPrinter::printItem("ivox.insert_voxel_size", ivox_insert_voxel_size);
+        ConfigPrinter::printItem("ivox.initial_voxel_size", ivox_initial_voxel_size);
         readYamlOrDefault(reader, "map.local_map_cube_len", local_map_cube_len);
         ConfigPrinter::printItem("local_map_cube_len", local_map_cube_len);
         const bool lidar_update_mode_configured =
@@ -534,14 +578,68 @@ void load_lio_yaml(const std::vector<string>& file_names) {
         std::transform(lidar_update_mode.begin(), lidar_update_mode.end(), lidar_update_mode.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (lidar_update_mode == "pose_6") lidar_update_mode = "pose6";
-        if (lidar_update_mode == "full_21") lidar_update_mode = "full21";
-        if (lidar_update_mode != "pose6" && lidar_update_mode != "full21") {
+        // full21/full_21 were the names used before the Point-LIO-style
+        // angular-rate and specific-force states expanded the error state.
+        // Keep them as compatibility aliases, but report the actual dimension.
+        if (lidar_update_mode == "full_21" || lidar_update_mode == "full21" ||
+            lidar_update_mode == "full_27") {
+            lidar_update_mode = "full27";
+        }
+        if (lidar_update_mode != "pose6" && lidar_update_mode != "full27") {
             LOG_WARN(Core, "unsupported estimator.lidar_update_mode='" << lidar_update_mode
                            << "', fallback to pose6");
             lidar_update_mode = "pose6";
         }
         ConfigPrinter::printItem("lidar_update_mode", lidar_update_mode,
                                  !lidar_update_mode_configured);
+        /***** Point-LIO-style IMU state and on-demand IMU-group LiDAR update ******/
+        ConfigPrinter::printSubHeader("IMU Update");
+        readYamlOrDefault(reader, "estimator.imu_update.enable", imu_update_enable);
+        readYamlOrDefault(reader, "estimator.imu_update.output_state.velocity_process_variance",
+                          output_imu_velocity_process_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.output_state.angular_rate_process_variance",
+                          output_imu_angular_rate_process_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.output_state.acceleration_process_variance",
+                          output_imu_acceleration_process_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.output_state.gyro_bias_process_variance",
+                          output_imu_gyro_bias_process_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.output_state.accel_bias_process_variance",
+                          output_imu_accel_bias_process_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.output_state.gyro_measurement_variance",
+                          output_imu_gyro_measurement_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.output_state.accel_measurement_variance",
+                          output_imu_accel_measurement_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.lidar_measurement_variance",
+                          imu_update_lidar_measurement_variance);
+        readYamlOrDefault(reader, "estimator.imu_update.saturation.gyro_limit_rad_s",
+                          imu_saturation_gyro_limit_rad_s);
+        readYamlOrDefault(reader, "estimator.imu_update.saturation.accel_limit_g",
+                          imu_saturation_accel_limit_g);
+        readYamlOrDefault(reader, "estimator.imu_update.saturation.process_noise_scale",
+                          imu_saturation_process_noise_scale);
+        output_imu_velocity_process_variance = std::max(0.0, output_imu_velocity_process_variance);
+        output_imu_angular_rate_process_variance = std::max(0.0, output_imu_angular_rate_process_variance);
+        output_imu_acceleration_process_variance = std::max(0.0, output_imu_acceleration_process_variance);
+        output_imu_gyro_bias_process_variance = std::max(0.0, output_imu_gyro_bias_process_variance);
+        output_imu_accel_bias_process_variance = std::max(0.0, output_imu_accel_bias_process_variance);
+        output_imu_gyro_measurement_variance = std::max(1e-12, output_imu_gyro_measurement_variance);
+        output_imu_accel_measurement_variance = std::max(1e-12, output_imu_accel_measurement_variance);
+        imu_update_lidar_measurement_variance = std::max(1e-9, imu_update_lidar_measurement_variance);
+        imu_saturation_gyro_limit_rad_s = std::max(1e-6, imu_saturation_gyro_limit_rad_s);
+        imu_saturation_accel_limit_g = std::max(1e-6, imu_saturation_accel_limit_g);
+        imu_saturation_process_noise_scale = std::max(1.0, imu_saturation_process_noise_scale);
+        ConfigPrinter::printItemBool("imu_update.enable", imu_update_enable);
+        ConfigPrinter::printItem("imu_update.output_state.velocity_process_variance", output_imu_velocity_process_variance);
+        ConfigPrinter::printItem("imu_update.output_state.angular_rate_process_variance", output_imu_angular_rate_process_variance);
+        ConfigPrinter::printItem("imu_update.output_state.acceleration_process_variance", output_imu_acceleration_process_variance);
+        ConfigPrinter::printItem("imu_update.output_state.gyro_bias_process_variance", output_imu_gyro_bias_process_variance);
+        ConfigPrinter::printItem("imu_update.output_state.accel_bias_process_variance", output_imu_accel_bias_process_variance);
+        ConfigPrinter::printItem("imu_update.output_state.gyro_measurement_variance", output_imu_gyro_measurement_variance);
+        ConfigPrinter::printItem("imu_update.output_state.accel_measurement_variance", output_imu_accel_measurement_variance);
+        ConfigPrinter::printItem("imu_update.lidar_measurement_variance", imu_update_lidar_measurement_variance);
+        ConfigPrinter::printItem("imu_update.saturation.gyro_limit_rad_s", imu_saturation_gyro_limit_rad_s);
+        ConfigPrinter::printItem("imu_update.saturation.accel_limit_g", imu_saturation_accel_limit_g);
+        ConfigPrinter::printItem("imu_update.saturation.process_noise_scale", imu_saturation_process_noise_scale);
         readYamlOrDefault(reader, "estimator.online_gravity_estimation_enable", online_gravity_estimation_enable);
         readYamlOrDefault(reader, "estimator.lidar_ieskf.max_iterations", lidar_ieskf_max_iterations);
         readYamlOrDefault(reader, "estimator.lidar_ieskf.converge_rot_rad", lidar_ieskf_converge_rot_rad);
@@ -553,6 +651,7 @@ void load_lio_yaml(const std::vector<string>& file_names) {
         readYamlOrDefault(reader, "estimator.ikdtree_match.neighbor_max_dist2", ikdtree_neighbor_max_dist2);
         readYamlOrDefault(reader, "estimator.ikdtree_match.gate_mode", ikdtree_gate_mode);
         readYamlOrDefault(reader, "estimator.ikdtree_match.score_min", ikdtree_score_min);
+        readYamlOrDefault(reader, "estimator.ikdtree_match.pointlio_match_s", ikdtree_pointlio_match_s);
         readYamlOrDefault(reader, "estimator.ikdtree_match.match_thresh_base", ikdtree_match_thresh_base);
         readYamlOrDefault(reader, "estimator.ikdtree_match.match_thresh_scale", ikdtree_match_thresh_scale);
         ConfigPrinter::printItem("lidar_ieskf.max_iterations", lidar_ieskf_max_iterations);
@@ -566,6 +665,8 @@ void load_lio_yaml(const std::vector<string>& file_names) {
         ConfigPrinter::printItem("ikdtree_match.neighbor_max_dist2", ikdtree_neighbor_max_dist2);
         ConfigPrinter::printItem("ikdtree_match.gate_mode", ikdtree_gate_mode);
         ConfigPrinter::printItem("ikdtree_match.score_min", ikdtree_score_min);
+        ikdtree_pointlio_match_s = std::max(1e-9, ikdtree_pointlio_match_s);
+        ConfigPrinter::printItem("ikdtree_match.pointlio_match_s", ikdtree_pointlio_match_s);
         ConfigPrinter::printItem("ikdtree_match.match_thresh_base", ikdtree_match_thresh_base);
         ConfigPrinter::printItem("ikdtree_match.match_thresh_scale", ikdtree_match_thresh_scale);
 
