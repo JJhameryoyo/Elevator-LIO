@@ -18,6 +18,28 @@ downsample:
 map:
   local_map_cube_len: 1500.0 # 局部 ikd-tree 地图立方体边长 [m]，超出时清理旧地图
 
+# 移植自 MID360 sc_liorf_localization；独立线程运行，不改变前端 world 系状态。
+loop_closure:
+  enabled: true
+  scan_context: true # 距离检索失败时使用 Scan Context 检索
+  publish_map: false # /LIO/loop/map；关闭时仍在退出保存
+  frequency: 2.0 # 检测频率 [Hz]
+  keyframe_distance: 1.0 # 平移关键帧阈值 [m]
+  keyframe_angle: 0.2 # 旋转关键帧阈值 [rad]
+  keyframe_period: 2.0 # 关键帧最大时间间隔 [s]
+  search_radius: 15.0 # 距离回环候选的三维搜索半径 [m]
+  min_time: 30.0 # 历史候选必须超过该时间间隔 [s]
+  exclude_recent: 30 # 至少间隔该数量的关键帧
+  max_height_difference: 1.0 # 历史候选与当前帧允许的高度差，须小于层高 [m]
+  history_frames: 10 # 历史子图左右各取多少关键帧（仍需通过时间/高度筛选）
+  voxel_size: 0.3 # 关键帧与回环地图体素大小 [m]
+  fitness_threshold: 0.3 # ICP 最大平均平方误差 [m^2]
+  max_correspondence_distance: 2.0 # ICP 对应点最大距离 [m]
+  min_overlap: 0.5 # 当前点云中至少该比例有对应点
+  min_source_points: 300
+  min_target_points: 1000
+  sc_distance_threshold: 0.2 # 比原 MID360 的 0.65 更严格
+
 relocation:
   # Feature 功能 —— 将pcd文件预先加载进 ikdtree 中，同时关闭地图积累，可用于重定位，但仅能在原点附近启动
   relocation_enable: false # 是否开启重定位

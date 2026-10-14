@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.10)
 if(POLICY CMP0077)
     cmake_policy(SET CMP0077 NEW)
 endif()
+if(POLICY CMP0074)
+    cmake_policy(SET CMP0074 NEW)
+endif()
 
 project(lio LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -34,15 +37,24 @@ find_package(yaml-cpp REQUIRED)
 find_package(TBB REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
+option(LIO_ENABLE_LOOP_CLOSURE "Build the MID360 Scan Context / ICP / GTSAM backend" ON)
+if(LIO_ENABLE_LOOP_CLOSURE)
+    find_package(GTSAM REQUIRED)
+    find_package(Threads REQUIRED)
+    find_package(PCL REQUIRED COMPONENTS common io filters kdtree registration)
+    list(REMOVE_ITEM PCL_LIBRARIES QHULL::QHULL)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# ROS_VERSION is set by both standard ROS setup files.  The catkin fallback is
-# useful for IDEs and minimal ROS 1 shells where that variable is absent.
-if("$ENV{ROS_VERSION}" STREQUAL "2")
+# Standard ROS setup exports 1/2. Livox build.sh overwrites the inherited
+# environment variable with ROS1/ROS2, so accept both spellings here and in
+# package.xml to preserve colcon's conditional dependencies and build order.
+if("$ENV{ROS_VERSION}" STREQUAL "2" OR "$ENV{ROS_VERSION}" STREQUAL "ROS2")
     set(LIO_ROS_VERSION 2)
-elseif("$ENV{ROS_VERSION}" STREQUAL "1")
+elseif("$ENV{ROS_VERSION}" STREQUAL "1" OR "$ENV{ROS_VERSION}" STREQUAL "ROS1")
     set(LIO_ROS_VERSION 1)
 else()
     find_package(catkin QUIET)
@@ -150,7 +162,13 @@ set(LIO_NODE_SOURCES
     src/elevator/ElevatorProcess.cpp
     src/elevator/ElevatorSelfExit.cpp
     src/node/service.cpp
+    src/node/loop.cpp
 )
+
+if(LIO_ENABLE_LOOP_CLOSURE)
+    # Compile the copied implementation directly into this project's node.
+    list(APPEND LIO_NODE_SOURCES src/loop/LoopClosure.cpp src/loop/Scancontext.cpp)
+endif()
 
 function(lio_configure_target target)
     target_include_directories(${target} PRIVATE ${LIO_COMMON_INCLUDE_DIRS})
@@ -186,6 +204,11 @@ endfunction()
 add_executable(lio_node_bin ${LIO_NODE_SOURCES})
 set_target_properties(lio_node_bin PROPERTIES OUTPUT_NAME lio)
 lio_configure_target(lio_node_bin)
+target_compile_definitions(lio_node_bin PRIVATE LIO_ENABLE_LOOP_CLOSURE=$<BOOL:${LIO_ENABLE_LOOP_CLOSURE}>)
+if(LIO_ENABLE_LOOP_CLOSURE)
+    target_include_directories(lio_node_bin PRIVATE ${GTSAM_INCLUDE_DIR} ${GTSAM_INCLUDE_DIRS})
+    target_link_libraries(lio_node_bin gtsam Threads::Threads)
+endif()
 
 add_executable(sim_node
     src/sim/run_sim_node.cpp

@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 *.pcd
 *.txt
+!CMakeLists.txt
 *.csv
 *.tum
 *.sh

@@ -1,5 +1,7 @@
 # Elevator-LIO
 
+The MID360 Scan Context / ICP / GTSAM loop backend is available. See [loop closure setup and outputs](docs/loop_closure.md).
+
 [Chinese](README.md) | [English](README_en.md)
 
 Authors: Yifan Zhang, Yudong Huang, Yuchong Zhang, Changze Li, Haoran Liu, Ming Yang, Tong Qin*

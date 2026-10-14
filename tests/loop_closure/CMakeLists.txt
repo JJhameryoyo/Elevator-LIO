@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.10)
+project(elevator_loop_tests LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Eigen3 REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common io filters kdtree registration)
+list(REMOVE_ITEM PCL_LIBRARIES QHULL::QHULL)
+find_package(GTSAM REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(Threads REQUIRED)
+add_executable(loop_backend_test loop_backend_test.cpp
+    ../../src/loop/LoopClosure.cpp ../../src/loop/Scancontext.cpp)
+target_include_directories(loop_backend_test PRIVATE ../../include ${PCL_INCLUDE_DIRS}
+    ${GTSAM_INCLUDE_DIR} ${GTSAM_INCLUDE_DIRS})
+target_link_libraries(loop_backend_test Eigen3::Eigen ${PCL_LIBRARIES} yaml-cpp gtsam Threads::Threads)
+enable_testing()
+add_test(NAME loop_backend_regression COMMAND loop_backend_test)

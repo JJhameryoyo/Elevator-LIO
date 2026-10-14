@@ -21,6 +21,9 @@
 
 #include <functional>
 #include <map>
+#if LIO_ENABLE_LOOP_CLOSURE
+#include "loop/LoopClosure.h"
+#endif
 
 struct TimeRecord {
     double lidar_end_time;
@@ -70,6 +73,10 @@ namespace FSM {
 class LIONode {
 public:
     explicit LIONode(std::shared_ptr<lio_ros::Node> node);
+    void enqueue_loop_frame(const State& state, const PointCloudXYZI::Ptr& cloud);
+    void publish_loop_results();
+    void publish_loop_odometry(const lio_ros::Odometry& odometry);
+    void save_loop_results();
 
     void publish_imu_odometry(State state, double stamp_sec = -1.0);
     void publish_body_odometry(State state, double stamp_sec = -1.0);
@@ -116,6 +123,15 @@ private:
     void elevatorFlagCallback(const lio_ros::BoolConstPtr& msg);
 
     LidarPipeline lidar_pipeline_;
+#if LIO_ENABLE_LOOP_CLOSURE
+    std::unique_ptr<elevator_lio::LoopClosure> loop_backend_;
+    bool loop_publish_map_ = false;
+    std::size_t loop_count_ = 0;
+    std::string loop_error_;
+    lio_ros::Publisher<lio_ros::Odometry> loop_odom_pub_;
+    lio_ros::Publisher<lio_ros::Path> loop_path_pub_;
+    lio_ros::Publisher<lio_ros::PointCloud2> loop_map_pub_;
+#endif
 };
 
 // Callback Function

@@ -100,6 +100,20 @@ LIONode::LIONode(std::shared_ptr<lio_ros::Node> node)
     : node_(std::move(node)),
       lidar_pipeline_(*node_, shared_bufs, p_eskf_estimator, imu_process, ele_self_exit, ikd_map) {
     LOG_INFO(Core, "LIONode is running!");
+#if LIO_ENABLE_LOOP_CLOSURE
+    if (!runtime_config_yaml.empty()) {
+        auto config = elevator_lio::LoopClosureConfig::fromYaml(
+            package_share_path + "/yaml/" + runtime_config_yaml);
+        if (config.enabled && !relocation_enable) {
+            loop_publish_map_ = config.publish_map;
+            loop_backend_ = std::make_unique<elevator_lio::LoopClosure>(config);
+            loop_odom_pub_ = node_->advertise<lio_ros::Odometry>("/LIO/loop/odom", 10);
+            loop_path_pub_ = node_->advertise<lio_ros::Path>("/LIO/loop/path", 1, true);
+            loop_map_pub_ = node_->advertise<lio_ros::PointCloud2>("/LIO/loop/map", 1, true);
+            LOG_INFO(Core, "MID360 loop closure backend enabled (map -> world)");
+        }
+    }
+#endif
     /****** Topic Publish ******/
     clouds_lidar_pub_ = node_->advertise<lio_ros::PointCloud2>(clouds_lidar_topic_name, 10);
     clouds_lidar_effect_pub_ = node_->advertise<lio_ros::PointCloud2>(clouds_lidar_effect_topic_name, 10);
@@ -143,6 +157,7 @@ LIONode::LIONode(std::shared_ptr<lio_ros::Node> node)
 
 /******** [M4.1] Low-rate publish timers ********/
 void LIONode::timer_1HZ_callback() {
+    publish_loop_results();
     /**** 发布静态tf ****/
     publishStaticTransform();
     /*** 发布全局地图 ***/
@@ -162,6 +177,7 @@ void LIONode::timer_500HZ_callback() {
 
     if (result.processed) {
         const auto& post_state = result.post_state;
+        enqueue_loop_frame(post_state, result.dedistorted_cloud);
         publish_imu_odometry(post_state);
         publish_body_odometry(post_state);
         if (trajectory_log_enable & log_save_enable) {
@@ -437,6 +453,7 @@ int main(int argc, char** argv)
     // 启动并处理回调
     //ros::spin() 是 ROS 的主循环函数。  它会一直运行，直到节点被关闭（比如按下 Ctrl+C）。
     lio_ros::spin(*ros_node);
+    node.save_loop_results();
 
     /******** 下面的部分在按下 ctrl + c 后执行 *******/
     convert_traj_csv_to_tum();

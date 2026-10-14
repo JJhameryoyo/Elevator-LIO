@@ -44,6 +44,7 @@ void LIONode::publish_imu_odometry(State state, double stamp_sec) {
 
     // 发布里程计消息
     odom_imu_pub_.publish(odom_imu);
+    publish_loop_odometry(odom_imu);
 
     //Path
     static lio_ros::Path odom_path;

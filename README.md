@@ -1,5 +1,7 @@
 # Elevator-LIO
 
+已接入 MID360 的 Scan Context / ICP / GTSAM 回环后端，使用说明见 [回环检测](docs/loop_closure.md)。
+
 [中文](README.md) | [English](README_en.md)
 
 作者：Yifan Zhang, Yudong Huang, Yuchong Zhang, Changze Li, Haoran Liu, Ming Yang, Tong Qin*
@@ -167,6 +169,29 @@ source install/setup.bash
 也可以把驱动与 Elevator-LIO 放在同一个 colcon 工作空间，但必须从驱动目录执行
 `./build.sh humble`，让驱动先切换到 ROS 2 的 `package.xml`；驱动仍处于 ROS 1 清单状态时，
 不能直接执行裸 `colcon build`。
+
+若驱动与本项目在同一个工作空间，也可直接准备驱动清单并分两次构建，避免
+`build.sh` 清理整个工作空间的构建/安装目录。以下命令在已 source ROS 2 Humble、
+已安装 Livox-SDK2 的终端中执行，工作空间路径按实际修改：
+
+```bash
+cd ~/wl_elevator_lio
+cp src/livox_ros_driver2/package_ROS2.xml src/livox_ros_driver2/package.xml
+mkdir -p src/livox_ros_driver2/launch
+cp -r src/livox_ros_driver2/launch_ROS2/. src/livox_ros_driver2/launch/
+
+colcon build --packages-select livox_ros_driver2 --cmake-clean-cache \
+  --cmake-args -DROS_EDITION=ROS2 -DHUMBLE_ROS=humble -DCMAKE_BUILD_TYPE=Release
+source install/local_setup.bash
+
+CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-select lio \
+  --symlink-install --cmake-clean-cache \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DLIO_ENABLE_LOOP_CLOSURE=ON
+source install/local_setup.bash
+```
+
+本项目的 CMake 与 `package.xml` 同时接受标准 `ROS_VERSION=1/2` 和驱动脚本
+使用的 `ROS1/ROS2`，确保 ROS 2 构建类型与 Livox 驱动依赖生效。
 
 ### 运行
 
