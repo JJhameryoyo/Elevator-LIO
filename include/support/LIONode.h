@@ -127,6 +127,9 @@ private:
     std::unique_ptr<elevator_lio::LoopClosure> loop_backend_;
     bool loop_publish_map_ = false;
     std::size_t loop_count_ = 0;
+    std::size_t loop_input_frames_ = 0;
+    std::size_t loop_last_scan_points_ = 0;
+    bool loop_last_in_elevator_ = false;
     std::string loop_error_;
     lio_ros::Publisher<lio_ros::Odometry> loop_odom_pub_;
     lio_ros::Publisher<lio_ros::Path> loop_path_pub_;

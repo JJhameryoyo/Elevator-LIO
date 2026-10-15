@@ -1,5 +1,5 @@
 downsample:
-  point_filter_num: 2 # 订阅点云时的降采样比例 [ 确保为正整数 ]
+  point_filter_num: 1 # 保留接收的有效点；前端估计仍使用独立的自适应降采样
   blind: 0.8 # 订阅点云时忽略距离小于 blind 的点 [ 单位：m ]
   use_box_blind: false # true: 删除 LiDAR 坐标系中长方体内的自遮挡点，此时不使用球形 blind
   box_corner: # LiDAR 坐标系下长方体的 x/y/z 范围 [min, max]，单位 m
@@ -22,21 +22,22 @@ map:
 loop_closure:
   enabled: true
   scan_context: true # 距离检索失败时使用 Scan Context 检索
-  publish_map: false # /LIO/loop/map；关闭时仍在退出保存
+  publish_map: true # 发布 /LIO/loop/map，供 RViz 显示回环关键帧地图
   frequency: 2.0 # 检测频率 [Hz]
-  keyframe_distance: 1.0 # 平移关键帧阈值 [m]
-  keyframe_angle: 0.2 # 旋转关键帧阈值 [rad]
-  keyframe_period: 2.0 # 关键帧最大时间间隔 [s]
+  keyframe_distance: 0.3 # 平移关键帧阈值 [m]
+  keyframe_angle: 0.1 # 旋转关键帧阈值 [rad]
+  keyframe_period: 0.5 # 关键帧最大时间间隔 [s]
   search_radius: 15.0 # 距离回环候选的三维搜索半径 [m]
   min_time: 30.0 # 历史候选必须超过该时间间隔 [s]
   exclude_recent: 30 # 至少间隔该数量的关键帧
   max_height_difference: 1.0 # 历史候选与当前帧允许的高度差，须小于层高 [m]
   history_frames: 10 # 历史子图左右各取多少关键帧（仍需通过时间/高度筛选）
-  voxel_size: 0.3 # 关键帧与回环地图体素大小 [m]
+  voxel_size: 0.1 # 兼容已编译的旧版：同时控制关键帧、ICP 和地图体素 [m]
+  map_voxel_size: 0.1 # 新版独立地图体素 [m]；旧版通过上面的 voxel_size 调密度
   fitness_threshold: 0.3 # ICP 最大平均平方误差 [m^2]
   max_correspondence_distance: 2.0 # ICP 对应点最大距离 [m]
   min_overlap: 0.5 # 当前点云中至少该比例有对应点
-  min_source_points: 300
+  min_source_points: 300 # ICP 回环验证的最小点数；不用于禁止关键帧地图生成
   min_target_points: 1000
   sc_distance_threshold: 0.2 # 比原 MID360 的 0.65 更严格
 

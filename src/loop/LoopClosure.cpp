@@ -32,7 +32,7 @@
 namespace elevator_lio {
 void LoopClosureConfig::validate() const {
     const double positive[] = {frequency, keyframe_distance, keyframe_angle, keyframe_period,
-        search_radius, min_time, max_height_difference, voxel_size, fitness_threshold,
+        search_radius, min_time, max_height_difference, voxel_size, map_voxel_size, fitness_threshold,
         max_correspondence_distance, min_overlap, sc_distance_threshold};
     for (double value : positive)
         if (!std::isfinite(value) || value <= 0.0)
@@ -61,6 +61,7 @@ LoopClosureConfig LoopClosureConfig::fromYaml(const std::string& file) {
         LIO_LOOP_READ(max_height_difference)
         LIO_LOOP_READ(history_frames)
         LIO_LOOP_READ(voxel_size)
+        LIO_LOOP_READ(map_voxel_size)
         LIO_LOOP_READ(fitness_threshold)
         LIO_LOOP_READ(max_correspondence_distance)
         LIO_LOOP_READ(min_overlap)
@@ -146,8 +147,10 @@ struct LoopClosure::Impl {
                 frame.stamp - keys.back().frame.stamp < config.keyframe_period) return;
         }
         Frame key = frame;
-        key.cloud = downsample(frame.cloud, config.voxel_size);
-        if (key.cloud->size() < size_t(config.min_source_points)) return;
+        key.cloud = downsample(frame.cloud, config.map_voxel_size);
+        // Sparse scans can still contribute to the odometry-backed map. The
+        // ICP source threshold controls loop verification, not map retention.
+        if (key.cloud->size() < 3) return;
         const size_t index = keys.size();
         gtsam::NonlinearFactorGraph graph;
         gtsam::Values initial;
@@ -168,8 +171,8 @@ struct LoopClosure::Impl {
         keys.push_back({key, seed});
         // Indices must stay identical to the pose graph, including when SC is disabled.
         if (config.scan_context) {
-            LoopCloud copy(*key.cloud);
-            sc.makeAndSaveScancontextAndKeys(copy);
+            auto descriptor_cloud = downsample(key.cloud, config.voxel_size);
+            sc.makeAndSaveScancontextAndKeys(*descriptor_cloud);
         }
         updateOutput(isam.calculateEstimate());
     }
@@ -182,6 +185,8 @@ struct LoopClosure::Impl {
     }
 
     bool verify(size_t previous, size_t current, bool use_yaw, double yaw) {
+        const auto source = downsample(keys[current].frame.cloud, config.voxel_size);
+        if (source->size() < size_t(config.min_source_points)) return false;
         // Target submap is in the historical LiDAR frame, source in current LiDAR frame.
         // ICP returns previous_T_current; BetweenFactor(current,previous) needs its inverse.
         LoopCloud::Ptr target(new LoopCloud);
@@ -209,7 +214,7 @@ struct LoopClosure::Impl {
         icp.setTransformationEpsilon(1e-6);
         icp.setEuclideanFitnessEpsilon(1e-6);
         icp.setRANSACIterations(0);
-        icp.setInputSource(keys[current].frame.cloud);
+        icp.setInputSource(source);
         icp.setInputTarget(target);
         LoopCloud aligned;
         icp.align(aligned, guess.cast<float>());
@@ -273,7 +278,7 @@ struct LoopClosure::Impl {
             pcl::transformPointCloud(*key.frame.cloud, transformed, transform);
             *map += transformed;
         }
-        if (!map->empty()) map = downsample(map, config.voxel_size);
+        if (!map->empty()) map = downsample(map, config.map_voxel_size);
         std::lock_guard<std::mutex> lock(mutex);
         output.map = map;
         output.map_stamp = keys.empty() ? 0.0 : keys.back().frame.stamp;
@@ -329,7 +334,7 @@ void LoopClosure::enqueue(double stamp, const Eigen::Matrix4d& pose,
     for (const auto& point : *cloud)
         if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z))
             copy->push_back(point);
-    if (copy->size() < size_t(impl_->config.min_source_points)) return;
+    if (copy->size() < 3) return;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (impl_->stopping) return;

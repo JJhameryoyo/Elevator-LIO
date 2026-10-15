@@ -102,8 +102,15 @@ LIONode::LIONode(std::shared_ptr<lio_ros::Node> node)
     LOG_INFO(Core, "LIONode is running!");
 #if LIO_ENABLE_LOOP_CLOSURE
     if (!runtime_config_yaml.empty()) {
+        const std::string loop_config_file = package_share_path + "/yaml/" + runtime_config_yaml;
         auto config = elevator_lio::LoopClosureConfig::fromYaml(
-            package_share_path + "/yaml/" + runtime_config_yaml);
+            loop_config_file);
+        LOG_INFO(Core, "loop map config: file=" << loop_config_file
+                      << " enabled=" << config.enabled
+                      << " publish_map=" << config.publish_map
+                      << " map_voxel_size=" << config.map_voxel_size
+                      << " icp_voxel_size=" << config.voxel_size
+                      << " relocation=" << relocation_enable);
         if (config.enabled && !relocation_enable) {
             loop_publish_map_ = config.publish_map;
             loop_backend_ = std::make_unique<elevator_lio::LoopClosure>(config);

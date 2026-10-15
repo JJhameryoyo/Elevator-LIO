@@ -3,7 +3,11 @@
 
 void LIONode::enqueue_loop_frame(const State& state, const PointCloudXYZI::Ptr& cloud) {
 #if LIO_ENABLE_LOOP_CLOSURE
-    if (!loop_backend_ || state.in_elevator || !cloud || cloud->empty()) return;
+    if (!loop_backend_) return;
+    ++loop_input_frames_;
+    loop_last_scan_points_ = cloud ? cloud->size() : 0;
+    loop_last_in_elevator_ = state.in_elevator;
+    if (state.in_elevator || !cloud || cloud->empty()) return;
     Eigen::Matrix4d world_T_imu = Eigen::Matrix4d::Identity();
     world_T_imu.block<3, 3>(0, 0) = state.q.toRotationMatrix();
     world_T_imu.block<3, 1>(0, 3) = state.p;
@@ -66,6 +70,18 @@ void LIONode::publish_loop_results() {
 #if LIO_ENABLE_LOOP_CLOSURE
     if (!loop_backend_) return;
     const auto result = loop_backend_->snapshot();
+    const auto now = std::chrono::steady_clock::now();
+    static auto last_status = std::chrono::steady_clock::time_point{};
+    if (now - last_status >= std::chrono::seconds(5)) {
+        last_status = now;
+        LOG_INFO(Core, "loop map status: publish_map=" << loop_publish_map_
+                      << " input_frames=" << loop_input_frames_
+                      << " last_scan_points=" << loop_last_scan_points_
+                      << " in_elevator=" << loop_last_in_elevator_
+                      << " keyframes=" << result.poses.size()
+                      << " map_points=" << (result.map ? result.map->size() : 0)
+                      << " dropped_frames=" << result.dropped_frames);
+    }
     if (!result.error.empty() && result.error != loop_error_) {
         loop_error_ = result.error;
         LOG_ERROR(Core, "loop closure backend stopped: " << loop_error_);

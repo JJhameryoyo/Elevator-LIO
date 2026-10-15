@@ -12,10 +12,12 @@ def generate_launch_description():
     package_share = FindPackageShare("lio")
     config_path = LaunchConfiguration("config_path")
     use_rviz = LaunchConfiguration("use_rviz")
+    rviz_config = LaunchConfiguration("rviz_config")
 
     return LaunchDescription([
         DeclareLaunchArgument("config_path", default_value="root_config.yaml"),
         DeclareLaunchArgument("use_rviz", default_value="true"),
+        DeclareLaunchArgument("rviz_config", default_value="LIO_ros2.rviz"),
         Node(
             package="lio",
             executable="lio",
@@ -28,7 +30,7 @@ def generate_launch_description():
             executable="rviz2",
             name="rviz2",
             output="screen",
-            arguments=["-d", PathJoinSubstitution([package_share, "rviz", "LIO_ros2.rviz"])],
+            arguments=["-d", PathJoinSubstitution([package_share, "rviz", rviz_config])],
             condition=IfCondition(use_rviz),
         ),
     ])

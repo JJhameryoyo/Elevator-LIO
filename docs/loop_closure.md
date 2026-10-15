@@ -49,6 +49,21 @@ LiDAR 点云和包含 IMU→LiDAR 外参的位姿创建关键帧。
 和 PointCloud2。历史前端点云不能仅靠最新 TF 消除过去的累计误差，应使用
 `loop_map.pcd` 或 `/LIO/loop/map`。
 
+也可以直接启动专用的回环地图 RViz 配置，固定坐标系为 `map`，Loop Map
+使用绿色 3 像素点与 Transient Local / Reliable QoS：
+
+该专用视图默认关闭 LiDAR 当前帧和前端 Path 显示项，以便辨认累计的全局地图；
+需要对比时可手动打开。原 `LIO_ros2.rviz` 仍保留前端显示。
+
+```bash
+ros2 launch lio start_ros2.launch.py rviz_config:=LIO_loop_ros2.rviz
+```
+
+地图显示不需要降低 ICP 回环验证阈值。先用
+`ros2 topic echo /LIO/loop/map --once --field width --qos-durability transient_local`
+检查是否有地图点数，再检查 RViz 的 Loop Map / Status。不要在 RViz 中用
+`Map` 显示类型订阅这个话题；该显示类型接收 OccupancyGrid，而本项目发布的是 PointCloud2。
+
 ## 电梯与参数
 
 电梯模式内的点云不进入后端，以免移动轿厢形成虚假回环。历史候选先经过
@@ -62,8 +77,34 @@ ICP 同时检查收敛、平均平方误差、对应点覆盖率及校正后的�
 
 输入队列最多保留 8 帧，后端繁忙时丢弃最老的待处理帧；接受回环时日志报告
 回环数及丢帧累计数。关键帧/点云随建图时间增长，长时间任务应增大关键帧间隔。
-`publish_map` 默认关闭以降低地图重拼接开销；退出时仍会排空队列、做最后一次
+建图配置的 `publish_map` 默认开启，ROS 2 RViz 的 Loop Map/Loop Path 显示项
+订阅 `/LIO/loop/map` 和 `/LIO/loop/path`。无需等到首次回环，积累关键帧后即可
+看到地图；性能优先时可将 `publish_map` 关闭。退出时仍会排空队列、做最后一次
 检测并保存地图。后端异常会停止后端并报告原因，前端继续运行。
+
+`min_source_points` 仅限制 ICP 回环验证，并在 ICP 点云降采样后检查。至少包含
+3 个有限坐标点的帧可创建关键帧并生成地图，避免稀疏点云没有地图。
+启动日志打印实际读取的运行配置路径及地图发布开关；每 5 秒的 `loop map status`
+打印输入帧数、当前帧点数、电梯状态、关键帧数、地图点数和丢帧数。
+
+## 地图密度
+
+已编译的初版后端支持 `voxel_size`，它同时控制关键帧、ICP 和地图体素。
+不重新编译也能调密度：将运行配置中的 `voxel_size` 从 0.3 改为 0.1 m，
+设置 `point_filter_num: 1`，并缩短关键帧间隔后重启 LIO。当前建图 YAML 使用
+0.1 m，以兼容已有程序。还需要更密时可以改为 0.05 m，但初版 ICP 的点数也会增加。
+
+更新后的源码支持独立的 `map_voxel_size`；已有程序尚未编译这一更新时，
+单独修改 `map_voxel_size` 不会生效。新版可以设 `map_voxel_size: 0.05`、
+`voxel_size: 0.3`，使地图更密而 ICP / Scan Context 使用较粗的点云。
+建图配置的输入抽点比例改为 1；关键帧平移、旋转和最大时间间隔分别为
+0.3 m、0.1 rad、0.5 s。前端估计的自适应降采样目标仍是每秒 20000 点，它
+使用单独的 `downsampled_cloud_`，不会替换后端收到的去畸变输入点云。
+
+更密的关键帧与地图会增加内存和地图拼接开销。修改实际运行的 YAML 后只需
+重启节点。可直接编辑 `$(ros2 pkg prefix lio)/share/lio/yaml/runtime/mapping.yaml`，
+避免普通安装模式下源码 YAML 尚未复制到安装目录。随后重新建图或回放原始
+rosbag，生成新的 PCD；已有稀疏 PCD 无法补回丢失的细节。
 
 ## 回归验证
 
@@ -82,4 +123,4 @@ ctest --test-dir /tmp/elevator-loop-tests --output-on-failure
 
 本次移植所在 Windows 工作区未提供 ROS、CMake、PCL/GTSAM 编译环境，尚未
 运行这些 C++ 测试或 rosbag 回放。已通过 package.xml 解析、CMake 源文件路径、
-本地头文件依赖以及全部 19 个 YAML 参数与 C++ 读取字段的一致性检查。
+本地头文件依赖以及全部 20 个 YAML 参数与 C++ 读取字段的一致性检查。

@@ -1,6 +1,7 @@
 #include "loop/LoopClosure.h"
 #include "loop/scancontext/Scancontext.h"
 #include <pcl/common/transforms.h>
+#include <pcl/filters/voxel_grid.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -122,6 +123,54 @@ int main() {
         config.exclude_recent = 1;
         const auto elevator = twoFrames(config, 0.0, 61.0, true);
         require(elevator.poses.size() == 1 && elevator.loops == 0, "elevator frame suppression");
+        {
+            LoopClosure sparse_backend(config);
+            LoopCloud::Ptr sparse(new LoopCloud);
+            for (size_t i = 0; i < 50; ++i) sparse->push_back(cloud->points[i]);
+            sparse_backend.enqueue(1.0, Eigen::Matrix4d::Identity(), sparse, false);
+            Eigen::Matrix4d drift = Eigen::Matrix4d::Identity(); drift(0, 3) = 0.2;
+            sparse_backend.enqueue(61.0, drift, sparse, false);
+            sparse_backend.stop();
+            const auto sparse_result = sparse_backend.snapshot();
+            require(sparse_result.error.empty() && sparse_result.poses.size() == 2 &&
+                    sparse_result.map && !sparse_result.map->empty(),
+                    "sparse scans must still produce a map below the ICP source threshold");
+            require(sparse_result.loops == 0, "sparse scans must not bypass the ICP source threshold");
+        }
+        {
+            auto dense_config = testConfig();
+            dense_config.voxel_size = 0.3;
+            dense_config.map_voxel_size = 0.05;
+            LoopCloud::Ptr fine_scan(new LoopCloud);
+            for (int x = 0; x < 40; ++x) {
+                for (int y = 0; y < 40; ++y) {
+                    pcl::PointXYZI point;
+                    point.x = x * 0.025f;
+                    point.y = y * 0.025f;
+                    point.z = 1.0f;
+                    point.intensity = 1.0f;
+                    fine_scan->push_back(point);
+                }
+            }
+            pcl::VoxelGrid<pcl::PointXYZI> coarse_filter;
+            coarse_filter.setLeafSize(0.3f, 0.3f, 0.3f);
+            coarse_filter.setInputCloud(fine_scan);
+            LoopCloud coarse;
+            coarse_filter.filter(coarse);
+            require(coarse.size() < size_t(dense_config.min_source_points),
+                    "density fixture must be too sparse for ICP");
+            LoopClosure dense_backend(dense_config);
+            dense_backend.enqueue(1.0, Eigen::Matrix4d::Identity(), fine_scan, false);
+            Eigen::Matrix4d drift = Eigen::Matrix4d::Identity(); drift(0, 3) = 0.2;
+            dense_backend.enqueue(61.0, drift, fine_scan, false);
+            dense_backend.stop();
+            const auto dense_map = dense_backend.snapshot();
+            require(dense_map.error.empty() && dense_map.map &&
+                    dense_map.map->size() > coarse.size() * 5,
+                    "map must preserve finer detail than the ICP point cloud");
+            require(dense_map.loops == 0,
+                    "dense stored scans must not bypass the coarse ICP source-count check");
+        }
         config.enabled = false;
         require(twoFrames(config, 0.0, 61.0, false).poses.empty(), "disabled backend");
         config.frequency = 0.0;
