@@ -138,7 +138,22 @@ LIONode::LIONode(std::shared_ptr<lio_ros::Node> node)
     /****** Odometry Publish ******/
     odom_imu_pub_ = node_->advertise<lio_ros::Odometry>(odom_imu_topic_name, 10);
     odom_body_pub_ = node_->advertise<lio_ros::Odometry>(odom_vehicle_topic_name, 10);
+    current_pose_pub_ = node_->advertise<lio_ros::PoseStamped>(current_pose_topic_name, 10);
     odom_path_pub_ = node_->advertise<lio_ros::Path>("path_topic_name", 50);
+    localization_ready_ = !relocation_enable || !relocation_wait_for_initial_pose;
+    if (relocation_enable) {
+        initial_pose_sub_ = node_->subscribe<lio_ros::PoseWithCovarianceStamped>(
+            initial_pose_topic_name, 1,
+            [this](const lio_ros::PoseWithCovarianceStampedConstPtr& msg) { initialPoseCallback(msg); });
+        if (initial_pose_topic_name != "/initialpose") {
+            rviz_initial_pose_sub_ = node_->subscribe<lio_ros::PoseWithCovarianceStamped>(
+                "/initialpose", 1,
+                [this](const lio_ros::PoseWithCovarianceStampedConstPtr& msg) { initialPoseCallback(msg); });
+        }
+        if (!localization_ready_) {
+            LOG_INFO(Core, "[relocalization] waiting for a body pose in world on " << initial_pose_topic_name);
+        }
+    }
     /****** Topic Subscriber ******/
     pointcloud_sub_ = lidar_type == LidarType::Livox ?
         node_->subscribe<lio_ros::CustomMsg>(lidar_topic_name, 5000, pcl_cbk_custom, true):
@@ -180,6 +195,7 @@ void LIONode::timer_10HZ_callback() {
 
 /******** [M4.2] LiDAR pipeline timer ********/
 void LIONode::timer_500HZ_callback() {
+    if (!localization_ready_) return;
     auto result = lidar_pipeline_.process();
 
     if (result.processed) {
@@ -232,6 +248,14 @@ void LIONode::timer_2000HZ_callback()
                 ImuMsgConst msg = shared_bufs->getFrontSafe(shared_bufs->imu_buf);
                 imu_process.integration(msg, mean_acc);
                 lastest_imu_time = get_time_sec(msg->header.stamp);
+                applyPendingInitialPose(lastest_imu_time);
+                if (!localization_ready_) {
+                    // Keep IMU calibration/propagation alive, but do not match from an unknown pose.
+                    shared_bufs->popFrontSafe(shared_bufs->imu_buf);
+                    shared_bufs->clearSafe(shared_bufs->lidar_frame_buf);
+                    shared_bufs->clearSafe(shared_bufs->wheel_buf);
+                    break;
+                }
                 {
                     if (log_save_enable) {
                         static uint64_t raw_imu_seq = 0;
@@ -306,7 +330,8 @@ void LIONode::timer_2000HZ_callback()
                 // LiDAR 修正时刻并重新积分到后续 IMU 时刻。如果提前发布了这些后续 IMU 位姿，
                 // 后续 LiDAR 帧发布的校正位姿时间戳可能早于已发布时间戳，造成里程计时间回退。
                 // 因此这里只在预计下一帧 LiDAR 到达前的安全窗口内发布 IMU 先验位姿。
-                if (high_frequency_odom && lidar_frequency > 0.0 && lidar_end_time > 0.0) {
+                if (high_frequency_odom && lidar_frequency > 0.0 && lidar_end_time > 0.0 &&
+                    lidar_end_time > relocalization_time_) {
                     const double next_lidar_time = lidar_end_time + 1.0 / lidar_frequency;
                     constexpr double kLidarArrivalGuardSec = 0.005;
                     if (lastest_imu_time < next_lidar_time - kLidarArrivalGuardSec) {
@@ -325,6 +350,10 @@ void LIONode::timer_2000HZ_callback()
             }
             const auto frame_opt = shared_bufs->getFrontLidarFrameSafe();
             if (frame_opt.has_value()) {
+                if (frame_opt->base_time <= relocalization_time_) {
+                    shared_bufs->popFrontLidarFrameSafe();
+                    break;
+                }
                 lidar_end_time = frame_opt->end_time;
                 if (lastest_imu_time >= lidar_end_time) {
                     FSM::dispatch(FSM::Event::LidarTriger);

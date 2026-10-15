@@ -235,6 +235,7 @@ string global_map_topic_name; // world系全局地图发布的话题名
 string ikdtree_topic_name; // world系 ikdtree 发布的话题名
 string odom_imu_topic_name; // imu位姿的话题名
 string odom_vehicle_topic_name; // body位姿的话题名
+string current_pose_topic_name = "/current_pose";
 string lidar_update_mode = "pose6";
 bool online_gravity_estimation_enable = false;
 int lidar_ieskf_max_iterations = 4;
@@ -250,6 +251,8 @@ double ikdtree_score_min = 0.95;
 double ikdtree_match_thresh_base = 0.03;
 double ikdtree_match_thresh_scale = 0.01;
 bool relocation_enable; // 是否启用重定位
+bool relocation_wait_for_initial_pose = false;
+string initial_pose_topic_name = "/initial_pose";
 string pcd_load_name; // 重定位时，加载的点云文件名
 
 bool elevator_enable = true;
@@ -524,6 +527,9 @@ void load_lio_yaml(const std::vector<string>& file_names) {
             ConfigPrinter::printError("odom_vehicle_topic_name");
         }
 
+        readYamlOrDefault(reader, "topic_pub.current_pose_topic_name", current_pose_topic_name);
+        ConfigPrinter::printItem("current_pose_topic_name", current_pose_topic_name);
+
         /******** map ********/
         ConfigPrinter::printSubHeader("Map");
         ConfigPrinter::printItem("map_type", "ikdtree");
@@ -571,6 +577,10 @@ void load_lio_yaml(const std::vector<string>& file_names) {
 
         /***** relocation ******/
         ConfigPrinter::printSubHeader("Relocation");
+        readYamlOrDefault(reader, "relocation.wait_for_initial_pose", relocation_wait_for_initial_pose);
+        readYamlOrDefault(reader, "relocation.initial_pose_topic_name", initial_pose_topic_name);
+        ConfigPrinter::printItemBool("wait_for_initial_pose", relocation_wait_for_initial_pose);
+        ConfigPrinter::printItem("initial_pose_topic_name", initial_pose_topic_name);
         if (reader.read("relocation.relocation_enable", relocation_enable)) {
             ConfigPrinter::printItemBool("relocation_enable", relocation_enable);
         } else {

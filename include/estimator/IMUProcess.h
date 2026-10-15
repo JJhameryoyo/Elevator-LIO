@@ -37,6 +37,7 @@ public:
     std::vector<State, Eigen::aligned_allocator<State>> states_imu;
     /************ 对外接口函数 ************/
     void set_init_state(State state_init, double time_stamp); // 设置出输出位姿
+    void reset_state(const State& state, double time_stamp); // Reset history at the latest IMU sample.
     bool init(ImuMsgConst &msg, int init_imu_num,
               Eigen::Vector3d &mean_acc_, Eigen::Vector3d &mean_gyr_,
               State &state); // IMU 初始化：收集样本、计算均值、初始化状态

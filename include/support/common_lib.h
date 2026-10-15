@@ -442,6 +442,7 @@ extern string global_map_topic_name; // world系全局地图发布的话题名
 extern string ikdtree_topic_name; // world系 ikdtree 发布的话题名
 extern string odom_imu_topic_name; // imu位姿的话题名
 extern string odom_vehicle_topic_name; // body位姿的话题名
+extern string current_pose_topic_name;
 extern string lidar_update_mode; // lidar更新模式: pose6 / full21
 extern bool online_gravity_estimation_enable; // 是否在线估计重力加速度状态
 extern int lidar_ieskf_max_iterations;
@@ -457,6 +458,8 @@ extern double ikdtree_score_min;
 extern double ikdtree_match_thresh_base;
 extern double ikdtree_match_thresh_scale;
 extern bool relocation_enable; // 是否启用重定位
+extern bool relocation_wait_for_initial_pose;
+extern string initial_pose_topic_name;
 extern string pcd_load_name; // 重定位时，加载的点云文件名
 
 extern bool elevator_enable;

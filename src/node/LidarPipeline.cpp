@@ -397,7 +397,7 @@ void LidarPipeline::handleElevatorExit(State& post_state) {
         LOG_WARN(Map, "[LidarPipeline] schedule map rebuild after elevator exit"
                           << " frames=" << elevator_rebuild_map_on_exit_frames
                           << " min_points=" << elevator_rebuild_map_on_exit_min_points);
-    } else {
+    } else if (!relocation_enable) {
         applyVoxelFilter(raw_clouds_lidar_, cloud_init_lidar_, blind);
         cloud_init_world_ = estimator_->transLidar2World(*cloud_init_lidar_);
         ikd_map_->add(cloud_init_world_);

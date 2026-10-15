@@ -22,8 +22,10 @@ map:
   local_map_cube_len: 3000.0 # 局部 ikd-tree 地图立方体边长 [m]，超出时清理旧地图
 
 relocation:
-  # Feature 功能 —— 将pcd文件预先加载进 ikdtree 中，同时关闭地图积累，可用于重定位，但仅能在原点附近启动
+  # 预加载 PCD 地图；等待手动初始位姿后启动点面匹配定位
   relocation_enable: true # 是否开启重定位
+  wait_for_initial_pose: true # true: 等待 /initial_pose；false: 从原点直接定位，仍支持手动重置
+  initial_pose_topic_name: "/initial_pose" # PoseWithCovarianceStamped，world 系下车体中心位姿；也兼容 /initialpose
   pcd_load_name: "20251229-203113_scans.pcd" # 重定位时加载的 .pcd 文件名称，相对 PCD 文件夹
 
 pcd_save:
@@ -48,10 +50,11 @@ topic_pub:
   ikdtree_topic_name: "/LIO/ikdtree"  # ikdtree 发布的话题名
   odom_imu_topic_name: "/LIO/odom_imu"  # imu位姿发布的话题名
   odom_vehicle_topic_name: "/LIO/odom_vehicle"  # body位姿发布的话题名 如果 body_T_lidar 为单位阵，则相当于 odom_lidar
+  current_pose_topic_name: "/current_pose"  # world 系下车体中心的当前位置和姿态（PoseStamped）
 
 elevator:
   # Feature 功能 —— Elevator-LIO核心功能，电梯段的处理
-  enable: true # 电梯模式总开关；关闭后忽略自动检测和手动触发
+  enable: false # 电梯模式总开关；关闭后忽略自动检测和手动触发
   self_exit_detector: true # 基于 IMU 电梯运动阶段与停稳检测自动退出电梯模式
   door_detector:
     enable: true # 是否启用电梯门关闭自动检测

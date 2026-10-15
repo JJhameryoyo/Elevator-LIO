@@ -107,7 +107,14 @@ private:
     lio_ros::Publisher<lio_ros::PointCloud2> ikdtree_pub_;
     lio_ros::Publisher<lio_ros::Odometry> odom_imu_pub_;
     lio_ros::Publisher<lio_ros::Odometry> odom_body_pub_;
+    lio_ros::Publisher<lio_ros::PoseStamped> current_pose_pub_;
     lio_ros::Publisher<lio_ros::Path> odom_path_pub_;
+    lio_ros::Path odom_path_;
+    lio_ros::Subscription initial_pose_sub_;
+    lio_ros::Subscription rviz_initial_pose_sub_;
+    lio_ros::PoseWithCovarianceStampedConstPtr pending_initial_pose_;
+    bool localization_ready_ = true;
+    double relocalization_time_ = -1.0;
     lio_ros::Subscription pointcloud_sub_;
     lio_ros::Subscription imu_sub_;
     lio_ros::Subscription wheel_sub_;
@@ -121,6 +128,8 @@ private:
     lio_ros::Publisher<lio_ros::Bool> ele_state_pub_;
 
     void elevatorFlagCallback(const lio_ros::BoolConstPtr& msg);
+    void initialPoseCallback(const lio_ros::PoseWithCovarianceStampedConstPtr& msg);
+    void applyPendingInitialPose(double stamp);
 
     LidarPipeline lidar_pipeline_;
 #if LIO_ENABLE_LOOP_CLOSURE

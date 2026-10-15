@@ -47,7 +47,7 @@ void LIONode::publish_imu_odometry(State state, double stamp_sec) {
     publish_loop_odometry(odom_imu);
 
     //Path
-    static lio_ros::Path odom_path;
+    auto& odom_path = odom_path_;
     lio_ros::PoseStamped this_pose_stamped;
 
     this_pose_stamped.pose = odom_imu.pose.pose; // 使用已有的里程计姿态信息
@@ -109,6 +109,12 @@ void LIONode::publish_body_odometry(State state, double stamp_sec) {
     }
 
     odom_body_pub_.publish(odom_body);
+
+    // Publish the body pose with the same timestamp and elevator height correction.
+    lio_ros::PoseStamped current_pose;
+    current_pose.header = odom_body.header;
+    current_pose.pose = odom_body.pose.pose;
+    current_pose_pub_.publish(current_pose);
 
     // 发布tf变换
     lio_ros::TransformStamped trans;

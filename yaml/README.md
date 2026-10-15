@@ -322,7 +322,7 @@ map:
 - 值较大：保留范围更广，但内存占用和树维护成本更高。
 - 值较小：内存压力更低，但长距离回环到旧区域时可能已经没有历史点。
 - `mapping.yaml` 当前为 `1500 m`。
-- `relocation.yaml` 当前为 `3000 m`，用于尽量保留更大的预加载地图范围。
+- `relocation.yaml` 当前为 `3000 m`；定位模式保留整个参考地图，不执行局部地图裁剪，便于手动重定位到其他区域。
 
 该参数不是体素分辨率，也不是允许移动的最大距离。
 
@@ -331,6 +331,8 @@ map:
 ```yaml
 relocation:
   relocation_enable: false
+  wait_for_initial_pose: true
+  initial_pose_topic_name: "/initial_pose"
   pcd_load_name: "20251229-203113_scans.pcd"
 ```
 
@@ -339,11 +341,11 @@ relocation:
 - `false`：正常建图。每帧点云会转换到世界坐标系并加入 ikd-tree。
 - `true`：重定位。启动时加载已有 PCD 到 ikd-tree，并停止向地图持续添加当前点云。
 
-重定位模式当前依赖较好的初始位姿，只适合在原地图原点附近启动；它不是带全局搜索能力的任意位置重定位模块。
+重定位使用手动提供的初始位姿作为点面匹配的初值，仍需接近实际位置和朝向；没有全局搜索功能。定位期间不增加或裁剪参考地图。
 
 ### 6.2 `pcd_load_name`
 
-PCD 文件固定从以下目录读取：
+相对路径从编译时源码目录下的以下位置读取，也支持绝对路径：
 
 ```text
 lio/PCD/<pcd_load_name>
@@ -365,8 +367,40 @@ lio/PCD/building_map.pcd
 
 - 文件存在且可以被 PCL 正常读取。
 - PCD 坐标系与算法的 `world` 坐标系定义一致。
-- 地图原点、初始朝向和实际启动位置足够接近。
+- 手动初始位姿接近设备在地图中的实际位置和朝向。
 - 地图单位为米。
+
+地图不存在或为空时启动会报错退出。
+
+### 6.3 通过 `initial_pose` 手动重定位
+
+先在 `root_config.yaml` 中选择 `runtime_config: "runtime/relocation.yaml"`，设置地图文件，再正常启动 `lio`。当前 `relocation.yaml` 默认 `wait_for_initial_pose: true`：节点先完成静止 IMU 初始化，等待初始位姿期间不进行地图匹配、不发布当前位姿。配置缺少该字段或设置为 `false` 时保持原来的从原点直接定位行为，但运行中仍可通过话题手动重置。
+
+输入话题默认为 `/initial_pose`，消息为 ROS 1 的 `geometry_msgs/PoseWithCovarianceStamped` 或 ROS 2 的 `geometry_msgs/msg/PoseWithCovarianceStamped`。也订阅 RViz 常用的 `/initialpose`（相同消息类型）。消息描述 **`world` 系下车体中心的位姿**，与 `/current_pose` 的含义一致；程序根据 IMU–LiDAR–车体外参换算内部 IMU 位姿。`frame_id` 应填 `world`；空值按 `world` 处理，其他坐标系不会自动进行 TF 转换。
+
+例如在 ROS 2 中指定车体位置 `(5, 2, 0)`、航向角为 `0`：
+
+```bash
+ros2 topic pub --once /initial_pose geometry_msgs/msg/PoseWithCovarianceStamped \
+  "{header: {frame_id: world}, pose: {pose: {position: {x: 5.0, y: 2.0, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}"
+```
+
+ROS 1 对应命令：
+
+```bash
+rostopic pub -1 /initial_pose geometry_msgs/PoseWithCovarianceStamped \
+  "{header: {frame_id: world}, pose: {pose: {position: {x: 5.0, y: 2.0, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}"
+```
+
+航向角为 `yaw` 时，水平姿态四元数填写 `z = sin(yaw/2)`、`w = cos(yaw/2)`，其中 `yaw` 单位为弧度。多楼层定位要填写实际地图高度 `z`；RViz 的二维初始位姿工具通常给出 `z=0`，其他楼层建议用话题显式指定高度。
+
+默认 ROS 2 RViz 配置已添加 **2D Pose Estimate** 工具，Fixed Frame 使用 `world`，在地图上点击并拖动指定车体位置和朝向即可。需要显示预加载点云时，可开启 `pub.ikdtree_pub_enable` 并添加 `/LIO/ikdtree` 点云显示。
+
+每次发布都会重新设置定位初值，建议设备保持静止。收到请求后保留 IMU 零偏和重力标定，重置速度及电梯状态、IMU 积分历史和显示轨迹，丢弃跨越重置时刻的激光帧，再用后续扫描匹配地图。请求可在 IMU 初始化前发送，会暂存至初始化完成；多个待处理请求使用最后一个有效请求。消息时间戳不用于历史插值，初值在下一次处理的 IMU 时刻生效。
+
+协方差顺序为 `[x, y, z, rot_x, rot_y, rot_z]`。全零时使用位置标准差 `0.5 m`、姿态标准差 `15°`；非零时检查有限性、对称性和半正定性，并根据外参转换为内部误差状态协方差。非有限坐标、无效四元数或协方差会被拒绝。
+
+日志 `initial pose applied` 只表示初值已生效，匹配效果需要结合 `/current_pose`、当前扫描与参考地图的重合程度判断。建图模式不订阅这些重定位输入，手动定位不会自动切换 mapping/relocation 配置。
 
 ## 7. PCD 保存 `pcd_save`
 
@@ -457,6 +491,7 @@ topic_pub:
   ikdtree_topic_name: "/LIO/ikdtree"
   odom_imu_topic_name: "/LIO/odom_imu"
   odom_vehicle_topic_name: "/LIO/odom_vehicle"
+  current_pose_topic_name: "/current_pose"
 ```
 
 | 字段 | 数据内容与坐标系 |
@@ -468,6 +503,19 @@ topic_pub:
 | `ikdtree_topic_name` | ikd-tree 地图点，`world` 坐标系；受 ikd-tree 发布开关控制 |
 | `odom_imu_topic_name` | IMU 中心的里程计，父坐标系为 `world` |
 | `odom_vehicle_topic_name` | 根据 LiDAR–车体外参换算出的车体中心里程计，父坐标系为 `world` |
+| `current_pose_topic_name` | 车体中心的当前位姿，ROS 1 为 `geometry_msgs/PoseStamped`，ROS 2 为 `geometry_msgs/msg/PoseStamped`；`frame_id` 为 `world`，默认话题为 `/current_pose` |
+
+`current_pose` 与车体里程计使用相同的时间戳、位置和姿态，包含电梯模式下的高度补偿，随每帧 LiDAR 更新发布；启用 `pub.high_frequency_odom` 后也会随 IMU 先验里程计同步发布。该输出为 `world` 系下的前端位姿，回环校正后的 `map` 系 IMU 里程计仍由 `/LIO/loop/odom` 提供。旧配置未填写 `current_pose_topic_name` 时也会默认发布到 `/current_pose`。
+
+查看当前位置：
+
+```bash
+# ROS 1
+rostopic echo /current_pose
+
+# ROS 2
+ros2 topic echo /current_pose
+```
 
 一个容易混淆的地方是：字段名仍为 `clouds_lidar`，但主点云已经转换到 `world`；只有 `effect` 和 `reject` 调试点云仍使用 `lidar` 坐标系。RViz 中显示异常时，应首先检查 Fixed Frame 和消息 `frame_id`，不要仅根据话题名称判断坐标系。
 

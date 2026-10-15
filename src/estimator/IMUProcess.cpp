@@ -240,6 +240,20 @@ void IMUProcess::set_init_state(State state_init ,double time_stamp) {
     initialized = true;
 }
 
+void IMUProcess::reset_state(const State& state, double time_stamp) {
+    // Preserve the raw sample for the next trapezoidal integration interval.
+    const int latest = wrapIndex(head_ - 1);
+    const Eigen::Vector3d acc = imu_acc_buffer[latest];
+    const Eigen::Vector3d gyr = imu_gyr_buffer[latest];
+    State seed = state;
+    seed.time = time_stamp;
+    set_init_state(seed, time_stamp);
+    head_ = 1;
+    count_ = 1;
+    imu_acc_buffer[0] = acc;
+    imu_gyr_buffer[0] = gyr;
+}
+
 void IMUProcess::integration(ImuMsgConst imu_msg, Eigen::Vector3d mean_acc) {
     Eigen::Vector3d cur_gyr (imu_msg->angular_velocity.x,
                              imu_msg->angular_velocity.y,

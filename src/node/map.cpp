@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <cctype>
 #include <iomanip>
+#include <filesystem>
+#include <stdexcept>
 
 extern std::shared_ptr<EskfEstimator> p_eskf_estimator;
 extern vector<BoxPointType> cub_needrm;
@@ -186,6 +188,7 @@ void convert_traj_csv_to_tum() {
  * @brief 根据当前位置动态移动局部地图，减少内存占用
  */
 void LIONode::lasermap_fov_segment() {
+    if (relocation_enable) return; // Preserve the reference map across manual pose jumps.
     if (!ikd_map) return;
     if (p_eskf_estimator -> get_prior_states().empty()) return;
     auto states = p_eskf_estimator -> get_prior_states();
@@ -214,13 +217,20 @@ void init_ikd_map() {
 void build_kdtree_from_file() {
     if (relocation_enable) {
         PointCloudXYZI::Ptr cloud_init_world(new PointCloudXYZI);
-        std::string pcd_path = string(PACKAGE_ROOT_DIR) + "/PCD/" + pcd_load_name;
-        pcl::io::loadPCDFile(pcd_path, *cloud_init_world);
+        const std::filesystem::path configured_path(pcd_load_name);
+        const std::string pcd_path = (configured_path.is_absolute() ? configured_path :
+            std::filesystem::path(PACKAGE_ROOT_DIR) / "PCD" / configured_path).string();
+        if (pcl::io::loadPCDFile(pcd_path, *cloud_init_world) < 0 || cloud_init_world->empty()) {
+            throw std::runtime_error("Cannot load a non-empty relocation map: " + pcd_path);
+        }
         PointCloudXYZI::Ptr cloud_init_world_downsampled(new PointCloudXYZI);
         pcl::VoxelGrid<PointType> downSizeFilter;
         downSizeFilter.setLeafSize(0.1, 0.1, 0.1);
         downSizeFilter.setInputCloud(cloud_init_world);
         downSizeFilter.filter(*cloud_init_world_downsampled);
+        if (cloud_init_world_downsampled->empty()) {
+            throw std::runtime_error("Relocation map is empty after filtering: " + pcd_path);
+        }
         ikd_map->add(cloud_init_world_downsampled);
         std::cout << "[build_kdtree_from_file] Relocation Map Model " << std::endl;
         std::cout << "[build_kdtree_from_file] Load Points Numble : " << cloud_init_world_downsampled->points.size() << std::endl;

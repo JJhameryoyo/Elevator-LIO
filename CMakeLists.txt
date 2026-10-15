@@ -162,6 +162,7 @@ set(LIO_NODE_SOURCES
     src/elevator/ElevatorProcess.cpp
     src/elevator/ElevatorSelfExit.cpp
     src/node/service.cpp
+    src/node/relocalization.cpp
     src/node/loop.cpp
 )
 

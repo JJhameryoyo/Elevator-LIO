@@ -64,6 +64,12 @@ Visualization Manager:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Value: /initial_pose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853892326654787
   Views:
     Current:
       Class: rviz_default_plugins/Orbit

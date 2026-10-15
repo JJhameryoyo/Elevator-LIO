@@ -103,7 +103,7 @@ Useful features include:
 - **Spherical or box blind-zone filtering**: near-field points can be removed using either a spherical blind zone or a rectangular box.
 - **Additional body-frame output**: configure `offset.lidar_R_body` and `offset.lidar_t_body` under
   `yaml/sensors`.
-- **Simple relocation mode**: load a PCD map, start near the map origin, and run localization against it.
+- **Manual relocation**: load a PCD map and publish a body pose in `world` as `PoseWithCovarianceStamped` on `/initial_pose` (or RViz's `/initialpose`). The relocation preset waits for this seed before matching scans. Set `relocation.wait_for_initial_pose: false` to retain automatic localization from the origin.
 - **Covariance visualization**: can be enabled under `yaml/logging` for debugging.
 - **High-frequency odometry output**: can be enabled under `yaml/runtime` to publish IMU-preintegrated poses for downstream applications.
 

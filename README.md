@@ -2,6 +2,8 @@
 
 已接入 MID360 的 Scan Context / ICP / GTSAM 回环后端，使用说明见 [回环检测](docs/loop_closure.md)。
 
+建图、定位启动步骤和电梯模式配置见 [操作指南](docs/operation_guide.md)。
+
 [中文](README.md) | [English](README_en.md)
 
 作者：Yifan Zhang, Yudong Huang, Yuchong Zhang, Changze Li, Haoran Liu, Ming Yang, Tong Qin*
@@ -104,7 +106,7 @@ Elevator-LIO 的设计遵循开箱即用的原则，集成了许多便于使用�
 - **球形/长方体包围盒滤除**：除了指定球形滤除框，也可以指定长方体区域内点云滤除
 - **预留额外的 body 系输出**：可在 `yaml/sensors` 中配置 `offset.lidar_R_body` 和
   `offset.lidar_t_body`
-- **简单的重定位功能**：支持加载 PCD 地图，然后在原点启动并运行重定位
+- **手动重定位**：支持加载 PCD 地图，通过 `/initial_pose` 指定车体初始位姿后启动定位，也兼容 RViz 的 `/initialpose`；见 [配置说明](yaml/README.md#63-通过-initial_pose-手动重定位)
 - **协方差矩阵可视化**：可在 `yaml/logging` 中打开，方便调试
 - **高频输出**：可在 `yaml/runtime` 中打开，将 IMU 预积分位姿也输出出来，方便下游应用
 
@@ -345,7 +347,9 @@ elevator:
 
 ```yaml
 relocation:
-  relocation_enable: false # 是否开启重定位
+  relocation_enable: true # 是否开启重定位；root_config.yaml 需选择 runtime/relocation.yaml
+  wait_for_initial_pose: true # 等待 /initial_pose 后开始匹配地图
+  initial_pose_topic_name: "/initial_pose" # world 系下车体位姿，PoseWithCovarianceStamped
   pcd_load_name: "scans.pcd" # 重定位时加载的 .pcd 文件名称，相对 PCD 文件夹
 ```
 
@@ -430,9 +434,7 @@ relocation:
 │   └── logging                 # 控制台、文件日志和调试可视化
 ```
 
-## 引用
 
-使用本软件或数据集时，请引用 Elevator-LIO 论文：
 
 ```bibtex
 @article{zhang2026elevatorlio,
@@ -441,10 +443,3 @@ relocation:
   journal={arXiv preprint arXiv:2605.24495},
   year={2026}
 }
-```
-
-## 许可证
-
-本项目自有代码以 [GNU General Public License v2.0 or later](LICENSE) 发布。仓库包含的独立
-MIT 组件继续保留各自文件头中的 MIT 标识；ikd-Tree 等第三方代码保留其上游 GPLv2
-授权说明，来源和本地修改见 [THIRD_PARTY.md](include/ikd_tree/THIRD_PARTY.md)。

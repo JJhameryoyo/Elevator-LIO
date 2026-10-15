@@ -30,6 +30,7 @@
 #include <ros/package.h>
 #include <geometry_msgs/Pose.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
@@ -49,6 +50,7 @@
 #include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -91,6 +93,8 @@ using Odometry = nav_msgs::Odometry;
 using Path = nav_msgs::Path;
 using Pose = geometry_msgs::Pose;
 using PoseStamped = geometry_msgs::PoseStamped;
+using PoseWithCovarianceStamped = geometry_msgs::PoseWithCovarianceStamped;
+using PoseWithCovarianceStampedConstPtr = geometry_msgs::PoseWithCovarianceStampedConstPtr;
 using TransformStamped = geometry_msgs::TransformStamped;
 using Bool = std_msgs::Bool;
 using BoolConstPtr = std_msgs::BoolConstPtr;
@@ -114,6 +118,8 @@ using Odometry = nav_msgs::msg::Odometry;
 using Path = nav_msgs::msg::Path;
 using Pose = geometry_msgs::msg::Pose;
 using PoseStamped = geometry_msgs::msg::PoseStamped;
+using PoseWithCovarianceStamped = geometry_msgs::msg::PoseWithCovarianceStamped;
+using PoseWithCovarianceStampedConstPtr = PoseWithCovarianceStamped::ConstSharedPtr;
 using TransformStamped = geometry_msgs::msg::TransformStamped;
 using Bool = std_msgs::msg::Bool;
 using BoolConstPtr = Bool::ConstSharedPtr;

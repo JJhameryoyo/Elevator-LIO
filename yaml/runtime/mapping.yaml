@@ -68,10 +68,11 @@ topic_pub:
   ikdtree_topic_name: "/LIO/ikdtree"  # ikdtree 发布的话题名 [ 受 pub 开关影响 ]
   odom_imu_topic_name: "/LIO/odom_imu"  # imu位姿发布的话题名
   odom_vehicle_topic_name: "/LIO/odom_vehicle"  # body位姿发布的话题名 如果 body_T_lidar 为单位阵，则相当于 odom_lidar
+  current_pose_topic_name: "/current_pose"  # world 系下车体中心的当前位置和姿态（PoseStamped）
 
 elevator:
   # Feature 功能 —— Elevator-LIO核心功能，电梯段的处理
-  enable: true # 电梯模式总开关；关闭后忽略自动检测和手动触发
+  enable: false # 电梯模式总开关；关闭后忽略自动检测和手动触发
   self_exit_detector: true # 基于 IMU 电梯运动阶段与停稳检测自动退出电梯模式
   door_detector:
     enable: true # 是否启用电梯门关闭自动检测
