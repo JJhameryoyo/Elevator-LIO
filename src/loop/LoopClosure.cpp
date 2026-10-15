@@ -114,6 +114,7 @@ struct LoopClosure::Impl {
     size_t checked_count = 0;
     size_t mapped_key_count = 0;
     size_t mapped_edge_count = 0;
+    bool mapped_for_save = false;
 
     explicit Impl(const LoopClosureConfig& cfg) : config(cfg) {
         config.validate();
@@ -269,21 +270,30 @@ struct LoopClosure::Impl {
         if (match.first >= 0) verify(size_t(match.first), current, true, match.second);
     }
 
-    void rebuildMap() {
-        if (mapped_key_count == keys.size() && mapped_edge_count == edges.size()) return;
+    void rebuildMap(bool for_save = false) {
+        if (mapped_key_count == keys.size() && mapped_edge_count == edges.size() &&
+            mapped_for_save == for_save) return;
         LoopCloud::Ptr map(new LoopCloud);
+        if (for_save) {
+            size_t point_count = 0;
+            for (const auto& key : keys) point_count += key.frame.cloud->size();
+            map->reserve(point_count);
+        }
         for (const auto& key : keys) {
             LoopCloud transformed;
             const Eigen::Matrix4f transform = key.optimized.cast<float>();
             pcl::transformPointCloud(*key.frame.cloud, transformed, transform);
             *map += transformed;
         }
-        if (!map->empty()) map = downsample(map, config.map_voxel_size);
+        // Keep online snapshots compact. At shutdown retain overlapping keyframe
+        // samples, like MID360's cloudGlobal.pcd, without another global filter.
+        if (!for_save && !map->empty()) map = downsample(map, config.map_voxel_size);
         std::lock_guard<std::mutex> lock(mutex);
         output.map = map;
         output.map_stamp = keys.empty() ? 0.0 : keys.back().frame.stamp;
         mapped_key_count = keys.size();
         mapped_edge_count = edges.size();
+        mapped_for_save = for_save;
     }
 
     void run() {
@@ -311,7 +321,7 @@ struct LoopClosure::Impl {
                     detect();
                     next_detection = now + period;
                 }
-                if (build_map || finish) rebuildMap();
+                if (build_map || finish) rebuildMap(finish);
                 if (finish) return;
             }
         } catch (const std::exception& error) {

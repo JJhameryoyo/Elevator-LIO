@@ -7,7 +7,6 @@
 
 #include "support/LIONode.h"
 #include "support/common_lib.h"
-#include <pcl/filters/voxel_grid.h>
 extern std::shared_ptr<EskfEstimator> p_eskf_estimator;
 extern KD_TREE<PointType> ikdtree;
 extern PointCloudXYZI::Ptr map_world;
@@ -108,13 +107,10 @@ void shutdown_save_maps() {
             PointCloudXYZI::Ptr cleaned(new PointCloudXYZI);
             std::vector<int> indices;
             pcl::removeNaNFromPointCloud(*merged, *cleaned, indices);
-            PointCloudXYZI::Ptr downsampled(new PointCloudXYZI);
-            pcl::VoxelGrid<PointType> vg;
-            vg.setLeafSize(0.1, 0.1, 0.1);
-            vg.setInputCloud(cleaned);
-            vg.filter(*downsampled);
-            if (!downsampled->empty()) {
-                pcl::io::savePCDFileBinary(pcd_save_path, *downsampled);
+            // Preserve accumulated samples across frames, as in MID360's global
+            // PCD export. Frontend downsampling and match selection stay unchanged.
+            if (!cleaned->empty()) {
+                pcl::io::savePCDFileBinary(pcd_save_path, *cleaned);
                 std::cout << "save pcd file: " << pcd_save_path << std::endl;
             }
         }

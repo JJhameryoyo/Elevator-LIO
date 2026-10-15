@@ -22,7 +22,7 @@ struct LoopClosureConfig {
     double max_height_difference = 1.0;
     int history_frames = 10;
     double voxel_size = 0.3; // ICP / Scan Context point-cloud resolution
-    double map_voxel_size = 0.05; // retained keyframe and output map resolution
+    double map_voxel_size = 0.05; // retained keyframes and online map; PCD keeps frame overlap
     double fitness_threshold = 0.3;
     double max_correspondence_distance = 2.0;
     double min_overlap = 0.5;
@@ -61,7 +61,7 @@ public:
     LoopSnapshot snapshot() const;
     Eigen::Matrix4d correction() const;
     void requestMap();
-    void stop(); // drain queue, final detection, rebuild map, join (idempotent)
+    void stop(); // drain, final detection, assemble dense PCD map, join (idempotent)
     void save(const std::string& directory); // call after stop
 private:
     struct Impl;

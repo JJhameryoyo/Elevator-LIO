@@ -33,7 +33,7 @@ loop_closure:
   max_height_difference: 1.0 # 历史候选与当前帧允许的高度差，须小于层高 [m]
   history_frames: 10 # 历史子图左右各取多少关键帧（仍需通过时间/高度筛选）
   voxel_size: 0.1 # 兼容已编译的旧版：同时控制关键帧、ICP 和地图体素 [m]
-  map_voxel_size: 0.1 # 新版独立地图体素 [m]；旧版通过上面的 voxel_size 调密度
+  map_voxel_size: 0.1 # 关键帧/在线地图体素 [m]；退出保存的 PCD 保留帧间叠加，不再全局降采样
   fitness_threshold: 0.3 # ICP 最大平均平方误差 [m^2]
   max_correspondence_distance: 2.0 # ICP 对应点最大距离 [m]
   min_overlap: 0.5 # 当前点云中至少该比例有对应点

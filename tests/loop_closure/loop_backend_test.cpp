@@ -2,12 +2,15 @@
 #include "loop/scancontext/Scancontext.h"
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/io/pcd_io.h>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <random>
 #include <stdexcept>
+#include <thread>
 
 using namespace elevator_lio;
 void require(bool condition, const char* message) {
@@ -184,11 +187,49 @@ int main() {
         require(rejected, "invalid overlap rejection");
 
         config = testConfig();
+        config.scan_context = false;
         LoopClosure saved(config);
         saved.enqueue(1.0, Eigen::Matrix4d::Identity(), cloud, false);
+        // Identical poses/clouds isolate overlap retention from pose drift.
+        saved.enqueue(2.0, Eigen::Matrix4d::Identity(), cloud, false);
+        saved.requestMap();
+        LoopSnapshot online;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do {
+            online = saved.snapshot();
+            if (!online.error.empty() || (online.map && online.map_stamp == 2.0)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } while (std::chrono::steady_clock::now() < deadline);
+        require(online.error.empty() && online.map && online.map_stamp == 2.0 &&
+                online.poses.size() == 2, "online map must be available before saving");
+        pcl::VoxelGrid<pcl::PointXYZI> key_filter;
+        key_filter.setLeafSize(config.map_voxel_size, config.map_voxel_size, config.map_voxel_size);
+        key_filter.setInputCloud(cloud);
+        LoopCloud key_cloud;
+        key_filter.filter(key_cloud);
+        require(online.map->size() <= key_cloud.size(), "online map must still remove frame overlap");
+        const auto online_points = online.map->size();
         const auto directory = std::filesystem::temp_directory_path() /
             ("elevator-loop-test-" + std::to_string(std::random_device{}()));
         saved.save(directory.string());
+        saved.stop(); // preserve the dense final cache on repeated shutdown
+        const auto final_map = saved.snapshot();
+        require(final_map.error.empty() && final_map.map &&
+                final_map.map->size() == 2 * key_cloud.size(),
+                "shutdown must replace the compact cache and retain every keyframe sample");
+        require(online.map->size() == online_points, "published snapshots must remain immutable");
+        require(final_map.loops == online.loops &&
+                (final_map.poses.back().pose - online.poses.back().pose).norm() < 1e-8,
+                "dense export must not change estimation or loop results");
+        LoopCloud exported;
+        require(pcl::io::loadPCDFile<pcl::PointXYZI>((directory / "loop_map.pcd").string(), exported) == 0 &&
+                exported.size() == 2 * key_cloud.size() && exported.size() > online_points,
+                "saved PCD must retain overlap rather than the compact visualization map");
+        for (size_t i = 0; i < key_cloud.size(); ++i) {
+            require((exported[i].getVector3fMap() - key_cloud[i].getVector3fMap()).norm() < 1e-5f &&
+                    (exported[i + key_cloud.size()].getVector3fMap() - key_cloud[i].getVector3fMap()).norm() < 1e-5f,
+                    "export must preserve each transformed keyframe's geometry");
+        }
         require(std::filesystem::file_size(directory / "loop_map.pcd") > 0, "PCD save");
         require(std::filesystem::file_size(directory / "loop_trajectory.tum") > 0, "trajectory save");
         require(std::filesystem::file_size(directory / "loop_constraints.csv") > 0, "constraint save");
