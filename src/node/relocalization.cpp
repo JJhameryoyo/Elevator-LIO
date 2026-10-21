@@ -33,20 +33,24 @@ bool poseSeed(const lio_ros::PoseWithCovarianceStamped& message,
 
 void LIONode::initialPoseCallback(const lio_ros::PoseWithCovarianceStampedConstPtr& msg) {
     if (!relocation_enable) return;
+    initial_pose_event_ = "received";
     // The loaded PCD is already in world. Do not silently reinterpret another frame.
     if (!msg->header.frame_id.empty() && msg->header.frame_id != "world" &&
         msg->header.frame_id != "/world") {
+        initial_pose_event_ = "rejected_frame";
         LOG_WARN(Core, "[relocalization] initial pose rejected: frame_id must be world");
         return;
     }
     elevator_lio::InitialPoseSeed seed;
     if (!poseSeed(*msg, seed)) {
+        initial_pose_event_ = "rejected_invalid_pose_or_covariance";
         LOG_WARN(Core, "[relocalization] initial pose rejected: invalid position, quaternion or covariance");
         return;
     }
     // Callbacks and timers run in the node's single-threaded executor. Apply only
     // at an IMU boundary, including requests received before IMU initialization.
     pending_initial_pose_ = msg;
+    initial_pose_event_ = "queued";
     LOG_INFO(Core, "[relocalization] initial body pose queued; waiting for initialized IMU data");
 }
 
@@ -54,6 +58,7 @@ void LIONode::applyPendingInitialPose(double stamp) {
     if (!pending_initial_pose_) return;
     elevator_lio::InitialPoseSeed seed;
     if (!poseSeed(*pending_initial_pose_, seed)) {
+        initial_pose_event_ = "failed_to_apply_invalid_pose";
         pending_initial_pose_.reset();
         return;
     }
@@ -101,6 +106,7 @@ void LIONode::applyPendingInitialPose(double stamp) {
     odom_path_pub_.publish(odom_path_);
     pending_initial_pose_.reset();
     localization_ready_ = true;
+    initial_pose_event_ = "applied";
     LOG_INFO(Core, "[relocalization] initial pose applied at IMU time " << stamp
                    << "; matching subsequent scans against the loaded map");
 }

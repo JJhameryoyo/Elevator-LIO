@@ -127,8 +127,9 @@ void LIONode::save_loop_results() {
 #if LIO_ENABLE_LOOP_CLOSURE
     if (!loop_backend_) return;
     try {
-        loop_backend_->save(current_tempdir_log);
-        LOG_INFO(Core, "loop trajectory/map saved in " << current_tempdir_log);
+        const auto map_path = map_output_path("loop_map.pcd");
+        loop_backend_->save(current_tempdir_log, map_path);
+        LOG_INFO(Core, "loop map output: " << map_path << "; trajectory/constraints: " << current_tempdir_log);
     } catch (const std::exception& error) {
         LOG_ERROR(Core, "failed to save loop results: " << error.what());
     }

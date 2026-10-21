@@ -216,6 +216,7 @@ bool global_map_save_enable; // 是否启用点云保存
 int every_n_frame_save; // 每隔多少帧保存一次单帧地图，-1表示不保存
 bool timestamp_prefix; // 是否启用时间戳前缀
 string pcd_save_name; // 点云保存的文件名
+string pcd_save_dir = "~/home/maps";
 bool global_map_pub_enable; // 是否发布全局地图
 bool ikdtree_pub_enable; // 是否发布全局地图
 int clouds_lidar_pub_every_n = 1;
@@ -405,6 +406,8 @@ void load_lio_yaml(const std::vector<string>& file_names) {
 
         /******** pcd_save ********/
         ConfigPrinter::printSubHeader("PCD Save Settings");
+        readYamlOrDefault(reader, "pcd_save.save_dir", pcd_save_dir);
+        ConfigPrinter::printItem("save_dir", pcd_save_dir);
         if (reader.read("pcd_save.global_map_save_enable", global_map_save_enable)) {
             ConfigPrinter::printItemBool("global_map_save_enable", global_map_save_enable);
         } else {

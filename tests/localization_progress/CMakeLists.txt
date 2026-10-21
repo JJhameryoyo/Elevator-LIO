@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.10)
+project(elevator_localization_progress_tests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_executable(localization_progress_test localization_progress_test.cpp)
+target_include_directories(localization_progress_test PRIVATE ../../include)
+enable_testing()
+add_test(NAME localization_progress COMMAND localization_progress_test)

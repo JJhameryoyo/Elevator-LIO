@@ -220,6 +220,22 @@ ros2 launch lio start_ros2.launch.py config_path:=path_to_yaml
 ROS 2 launch 可添加 `use_rviz:=false`。ROS 1 使用 `rviz/LIO.rviz`，ROS 2 使用
 `rviz/LIO_ros2.rviz`；电梯状态面板在两个版本中均会构建。
 
+接入同一工作区中的 `jared_3d_nav` 时，使用固定地图定位配置
+`config_path:=root_navigation.yaml`，并在 `yaml/runtime/relocation.yaml` 中设置
+`relocation.pcd_load_name`。导航入口为 `ros2 launch octo_planner elevator_lio.launch.py
+lio_pcd_dir:=/absolute/path/to/Elevator-LIO/PCD`，它读取相同 PCD、车体 `/current_pose`
+和 `/LIO/clouds_lidar`，统一使用 `world` 坐标系。完整启动与标定说明见
+[导航 README](../jared_3d_nav/README.md#使用-elevator-lio-定位和-pcd-地图)。
+
+也可用一个命令同时启动定位和导航：
+
+```bash
+ros2 launch octo_planner bringup.launch.py lio_pcd_dir:=/absolute/path/to/Elevator-LIO/PCD
+```
+
+总入口默认读取已安装的 `root_navigation.yaml`；通过 `lidar_launch_file:=/path/to/driver.launch.py`
+可将已经配置好的 MID360 驱动一起启动。不要再同时单独启动 `lio`。
+
 ### 电梯模式说明
 
 电梯功能由统一开关控制：
@@ -355,7 +371,11 @@ relocation:
 
 ## 目录结构
 
-每次建图结束后，地图都会保存到 `PCD` 文件夹下。
+每次建图结束后，地图默认保存到 `~/home/maps/`，可通过
+`yaml/runtime/mapping.yaml` 的 `pcd_save.save_dir` 修改。`~` 会展开为当前用户主目录，
+例如 `/home/robot/home/maps/`；目录不存在时会自动创建。
+前端地图、ikd-tree 地图和回环地图均保存到此目录，临时分帧文件位于其 `Temp/` 子目录。
+重定位时请将 `relocation.pcd_load_name` 指向实际保存的地图绝对路径。
 
 日志文件会生成在项目的 `temp` 文件夹下。
 
@@ -366,7 +386,7 @@ relocation:
 
 ```text
 ├── CMakeLists.txt
-├── PCD                         # 建图结果、重定位地图和临时点云
+├── PCD                         # 旧版地图目录；相对名称的重定位输入仍从这里读取
 │   └── Temp                    # 运行过程中生成的临时点云
 ├── docs                        # README 使用的说明文档与资源
 │   └── images                  # 项目图片、流程图和效果图

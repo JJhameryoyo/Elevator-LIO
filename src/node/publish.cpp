@@ -115,6 +115,8 @@ void LIONode::publish_body_odometry(State state, double stamp_sec) {
     current_pose.header = odom_body.header;
     current_pose.pose = odom_body.pose.pose;
     current_pose_pub_.publish(current_pose);
+    ++published_pose_count_;
+    last_pose_publish_wall_ = lio_ros::steady_time_seconds();
 
     // 发布tf变换
     lio_ros::TransformStamped trans;
@@ -216,7 +218,7 @@ void LIONode::publishGlobalMap() {
         else{
             // 构造文件名，准备先记录到文件中
             std::stringstream ss;
-            ss << PACKAGE_ROOT_DIR << "/PCD/Temp/incremental_cloud_" << frame_idx++ << ".pcd";
+            ss << pcd_save_dir << "/Temp/incremental_cloud_" << frame_idx++ << ".pcd";
             // 保存本帧
             pcl::io::savePCDFileBinary(ss.str(), *effect_down_cloud_world);
             // 路径保存起来

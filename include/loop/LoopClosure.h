@@ -62,7 +62,8 @@ public:
     Eigen::Matrix4d correction() const;
     void requestMap();
     void stop(); // drain, final detection, assemble dense PCD map, join (idempotent)
-    void save(const std::string& directory); // call after stop
+    // Trajectory/constraints remain in directory; map_file can select a separate PCD output.
+    void save(const std::string& directory, const std::string& map_file = ""); // call after stop
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

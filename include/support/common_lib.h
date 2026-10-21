@@ -423,6 +423,8 @@ extern bool global_map_save_enable; // 是否启用点云保存
 extern int every_n_frame_save; // 每隔多少帧保存一次单帧地图，-1表示不保存
 extern bool timestamp_prefix; // 是否启用时间戳前缀
 extern string pcd_save_name; // 点云保存的文件名
+extern string pcd_save_dir; // 建图输出目录；启动时展开 ~ 并解析为绝对路径
+string map_output_path(const string& filename);
 extern bool global_map_pub_enable; // 是否发布全局地图
 extern bool ikdtree_pub_enable; // 是否发布全局地图
 extern int clouds_lidar_pub_every_n; // lidar系当前帧点云每隔多少帧发布一次，1表示每帧都发布

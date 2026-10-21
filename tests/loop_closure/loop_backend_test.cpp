@@ -231,6 +231,12 @@ int main() {
                     "export must preserve each transformed keyframe's geometry");
         }
         require(std::filesystem::file_size(directory / "loop_map.pcd") > 0, "PCD save");
+          const auto custom_map = directory / "maps" / "custom_loop_map.pcd";
+          saved.save(directory.string(), custom_map.string());
+          LoopCloud custom_exported;
+          require(pcl::io::loadPCDFile<pcl::PointXYZI>(custom_map.string(), custom_exported) == 0 &&
+                  custom_exported.size() == exported.size(),
+                  "custom map directory must be created and preserve exported points");
         require(std::filesystem::file_size(directory / "loop_trajectory.tum") > 0, "trajectory save");
         require(std::filesystem::file_size(directory / "loop_constraints.csv") > 0, "constraint save");
         // Remove only the three files created by this test, then the empty directory.

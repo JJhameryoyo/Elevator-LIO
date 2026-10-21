@@ -324,7 +324,12 @@ relocation:
 
 ## Directory Layout
 
-After mapping, maps are saved under the `PCD` directory.
+After mapping, maps are saved under `~/home/maps/` by default. Set `pcd_save.save_dir`
+in `yaml/runtime/mapping.yaml` to change it. The directory is created automatically,
+and `~` expands to the current user's home (for example `/home/robot/home/maps/`).
+Frontend, ikd-tree and loop maps share this directory; intermediate clouds use its
+`Temp/` subdirectory. Set `relocation.pcd_load_name` to the exported map's absolute
+path when starting localization.
 
 Log files are generated under the project's `temp` directory.
 
@@ -334,7 +339,7 @@ The `temp` directory stores key data records from the current run.
 
 ```text
 ├── CMakeLists.txt
-├── PCD                         # Mapping results, relocation maps, and temporary point clouds
+├── PCD                         # Legacy maps; relative relocation map names are still resolved here
 │   └── Temp                    # Temporary point clouds generated at runtime
 ├── docs                        # Images and documentation assets used by README
 │   └── images

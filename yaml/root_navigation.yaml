@@ -1,0 +1,5 @@
+# Fixed-map localization shared with jared_3d_nav/elevator_lio.launch.py.
+# Calibrate sensors/livox.yaml and set relocation.pcd_load_name before use.
+sensor_config: "sensors/livox.yaml"
+runtime_config: "runtime/relocation.yaml"
+logging_config: "logging/default.yaml"

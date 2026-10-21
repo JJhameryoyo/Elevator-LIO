@@ -47,10 +47,11 @@ relocation:
   pcd_load_name: "20251229-203113_scans.pcd" # 重定位时加载的 .pcd 文件名称，相对 PCD 文件夹
 
 pcd_save:
+  save_dir: "~/home/maps" # 建图输出目录，~ 展开为当前用户主目录；不存在时自动创建
   global_map_save_enable: true # 是否保存全局点云 [ 只在未开启重定位时有效 ]
   every_n_frame_save: -1 # 保存单帧点云（world系），每 n 帧保存一次， -1 表示不单独保存每帧pcd地图
   timestamp_prefix: true # 是否在名称前加上时间戳
-  pcd_save_name: "scans.pcd" # 保存点云的名称，相对 PCD 文件夹
+  pcd_save_name: "scans.pcd" # 保存点云的文件名，输出到 save_dir
 
 pub:
   global_map_pub_enable: false # 是否发布全局地图 [ 耗时较长，可视化需要，实际使用中不建议开启 ] [ 只在未开启重定位且保存全局点云时有效 ]

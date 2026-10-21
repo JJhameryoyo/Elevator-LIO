@@ -373,7 +373,7 @@ void LoopClosure::stop() {
     impl_->wake.notify_one();
     if (impl_->worker.joinable()) impl_->worker.join();
 }
-void LoopClosure::save(const std::string& directory) {
+void LoopClosure::save(const std::string& directory, const std::string& map_file) {
     stop();
     const auto result = snapshot();
     if (!result.error.empty()) throw std::runtime_error("loop backend failed: " + result.error);
@@ -393,8 +393,12 @@ void LoopClosure::save(const std::string& directory) {
     trajectory.flush();
     constraints.flush();
     if (!trajectory || !constraints) throw std::runtime_error("failed writing loop trajectory/constraints");
-    if (result.map && !result.map->empty() &&
-        pcl::io::savePCDFileBinary((std::filesystem::path(directory) / "loop_map.pcd").string(), *result.map) != 0)
-        throw std::runtime_error("cannot save loop_map.pcd");
+    if (result.map && !result.map->empty()) {
+        const auto map_path = map_file.empty() ? std::filesystem::path(directory) / "loop_map.pcd"
+                                              : std::filesystem::path(map_file);
+        if (!map_path.parent_path().empty()) std::filesystem::create_directories(map_path.parent_path());
+        if (pcl::io::savePCDFileBinary(map_path.string(), *result.map) != 0)
+            throw std::runtime_error("cannot save loop map: " + map_path.string());
+    }
 }
 } // namespace elevator_lio

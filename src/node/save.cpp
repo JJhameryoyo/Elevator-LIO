@@ -7,12 +7,25 @@
 
 #include "support/LIONode.h"
 #include "support/common_lib.h"
+#include <filesystem>
 extern std::shared_ptr<EskfEstimator> p_eskf_estimator;
 extern KD_TREE<PointType> ikdtree;
 extern PointCloudXYZI::Ptr map_world;
 extern vector<string> incremental_paths;
 
 /********************************************** Save Function **********************************************/
+
+string map_output_path(const string& filename) {
+    std::string prefix;
+    if (timestamp_prefix) {
+        const auto now = std::chrono::system_clock::now();
+        const auto stamp = std::chrono::system_clock::to_time_t(now);
+        std::ostringstream stream;
+        stream << std::put_time(std::localtime(&stamp), "%Y%m%d-%H%M%S") << "_";
+        prefix = stream.str();
+    }
+    return (std::filesystem::path(pcd_save_dir) / (prefix + filename)).string();
+}
 
 void LIONode::save_odometry(State state, double time, const string& save_path) {
     const LogFileChannel channel = save_path.empty() ? LogFileChannel::TrajectoryPost
@@ -55,9 +68,9 @@ void LIONode::save_singel_clouds_world(PointCloudXYZI::Ptr clouds_lidar) {
                 auto in_time_t = std::chrono::system_clock::to_time_t(now);
                 std::stringstream  folder_name_ss;
                 folder_name_ss << std::put_time(std::localtime(&in_time_t), "%Y%m%d-%H%M%S");
-                folder_name = string(PACKAGE_ROOT_DIR) + "/PCD/" + folder_name_ss.str();
+                folder_name = (std::filesystem::path(pcd_save_dir) / folder_name_ss.str()).string();
                 // 以文件夹名创建文件夹
-                mkdir(folder_name.c_str(), 0777);
+                std::filesystem::create_directories(folder_name);
                 first = false;
             }
             // 时间戳保留9位小数
@@ -80,16 +93,7 @@ void LIONode::save_singel_clouds_world(PointCloudXYZI::Ptr clouds_lidar) {
 void shutdown_save_maps() {
     if (relocation_enable || !global_map_save_enable) return;
 
-    std::string pcd_save_path;
-    if (timestamp_prefix) {
-        auto now = std::chrono::system_clock::now();
-        auto in_time_t = std::chrono::system_clock::to_time_t(now);
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&in_time_t), "%Y%m%d-%H%M%S");
-        pcd_save_path = string(PACKAGE_ROOT_DIR) + "/PCD/" + ss.str() + "_" + pcd_save_name;
-    } else {
-        pcd_save_path = string(PACKAGE_ROOT_DIR) + "/PCD/" + pcd_save_name;
-    }
+    const std::string pcd_save_path = map_output_path(pcd_save_name);
 
     if (global_map_pub_enable) {
         if (!map_world->empty()) {
@@ -129,12 +133,7 @@ void shutdown_save_maps() {
             cloud_ikdtree->width = points.size();
             cloud_ikdtree->height = 1;
             cloud_ikdtree->is_dense = true;
-            std::string ikdtree_path;
-            if (timestamp_prefix) {
-                ikdtree_path = string(PACKAGE_ROOT_DIR) + "/PCD/" + std::to_string(std::time(nullptr)) + "_ikdtree_" + pcd_save_name;
-            } else {
-                ikdtree_path = string(PACKAGE_ROOT_DIR) + "/PCD/ikdtree_" + pcd_save_name;
-            }
+            const std::string ikdtree_path = map_output_path("ikdtree_" + pcd_save_name);
             pcl::io::savePCDFileBinary(ikdtree_path, *cloud_ikdtree);
             std::cout << "save ikdtree pcd file: " << ikdtree_path << std::endl;
         }

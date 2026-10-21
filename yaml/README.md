@@ -402,10 +402,37 @@ rostopic pub -1 /initial_pose geometry_msgs/PoseWithCovarianceStamped \
 
 日志 `initial pose applied` 只表示初值已生效，匹配效果需要结合 `/current_pose`、当前扫描与参考地图的重合程度判断。建图模式不订阅这些重定位输入，手动定位不会自动切换 mapping/relocation 配置。
 
+### 6.4 定位无输出时的内部状态
+
+`/LIO/localization_status` 每秒发布一条 `std_msgs/String`（ROS 2 为 `std_msgs/msg/String`），
+包含 LIO 回调实际收到的 IMU/雷达消息计数、初始位姿处理事件、状态机阶段、待处理扫描时间和已发布位姿计数。
+外部 `ros2 topic hz` 有频率只说明传感器在发布，诊断中的 `imu_msgs`、`lidar_msgs` 才表示 LIO 回调已经收到消息。
+
+```bash
+ros2 topic echo /LIO/localization_status --once
+```
+
+| `status` | 含义 |
+| --- | --- |
+| `no_imu_received_by_lio` / `imu_input_stale` | LIO 未收到 IMU，或输入已超过 2 秒未更新 |
+| `initializing_imu` | 正在收集 IMU 初始化样本 |
+| `waiting_for_initial_pose` | IMU 已初始化，正在等待有效初始位姿 |
+| `initial_pose_queued_not_applied` | 初值已接收，正在等待 IMU 边界应用 |
+| `no_lidar_received_by_lio` / `lidar_input_stale` | LIO 未收到雷达消息，或输入已超过 2 秒未更新 |
+| `waiting_for_valid_lidar_frame` | 已有雷达回调，但此刻没有待处理的有效扫描；若持续出现，检查点数、过滤条件和输入时间 |
+| `scan_time_not_after_initial_pose` | 待处理扫描时间没有晚于位姿重置时间；若持续出现，检查雷达与 IMU 时间基准 |
+| `waiting_for_imu_to_reach_scan_end` | 已处理的 IMU 时间尚未覆盖扫描末尾；若 `scan_end_minus_imu` 长时间很大，检查时间戳同步 |
+| `waiting_for_scan_update` | 输入和时间门槛已满足，但近期没有发布位姿，结合 IMU 去畸变及扫描处理错误日志继续检查 |
+| `publishing_current_pose` | 最近 2 秒内发布过车体位姿；`poses` 为发布次数 |
+
+`initial_pose` 字段另行显示 `not_received`、`queued`、`applied`、`rejected_frame` 或无效位姿/协方差等处理结果。
+该话题用于诊断，不改变定位状态。阻塞原因变化时会输出控制台日志，持续阻塞时每 5 秒输出一次。
+
 ## 7. PCD 保存 `pcd_save`
 
 ```yaml
 pcd_save:
+  save_dir: "~/home/maps"
   global_map_save_enable: true
   every_n_frame_save: -1
   timestamp_prefix: true
@@ -414,15 +441,16 @@ pcd_save:
 
 | 字段 | 说明 |
 | --- | --- |
+| `save_dir` | 建图输出目录，默认 `~/home/maps`；自动展开 `~` 并创建目录，相对路径基于项目目录 |
 | `global_map_save_enable` | 退出程序时是否保存累计的全局点云 |
 | `every_n_frame_save` | 是否按固定帧间隔单独保存世界坐标系点云；`-1` 表示关闭 |
 | `timestamp_prefix` | 是否在输出文件名前添加时间戳，避免覆盖旧文件 |
 | `pcd_save_name` | 输出 PCD 文件名 |
 
-输出目录固定为：
+默认输出目录为（`~` 是运行进程的当前用户主目录，例如 `/home/robot`）：
 
 ```text
-lio/PCD/
+~/home/maps/
 ```
 
 注意：
@@ -430,9 +458,11 @@ lio/PCD/
 - 全局地图保存只在非重定位模式下有效。
 - `every_n_frame_save` 设置为较小正数会产生大量文件并增加磁盘写入负载。
 - `timestamp_prefix: false` 时，同名文件可能被后续运行覆盖。
-- 异常退出时不一定能执行最终地图合并保存，但过程文件会存在`/PCD/Temp`文件夹中。
+- 异常退出时不一定能执行最终地图合并保存，过程文件位于 `save_dir/Temp/`。
 - `scans.pcd` 累积前端有效匹配点，退出合并时仅清理无效点，不再做固定 0.1 m 全局体素过滤，保留多帧叠加点。
-- 更完整的回环地图使用日志会话目录中的 `loop_map.pcd`：每个关键帧按 `loop_closure.map_voxel_size` 过滤后，用优化位姿拼接保存，退出时不再做全局过滤。在线 `/LIO/loop/map` 仍使用全局过滤。
+- 更完整的回环地图保存为 `save_dir/<时间戳>_loop_map.pcd`（关闭 `timestamp_prefix` 时为 `loop_map.pcd`）：每个关键帧按 `loop_closure.map_voxel_size` 过滤后，用优化位姿拼接保存，退出时不再做全局过滤。在线 `/LIO/loop/map` 仍使用全局过滤。回环轨迹和约束文件保留在日志会话目录。
+- 前端 `scans.pcd`、`ikdtree_scans.pcd` 和开启单帧导出后的子目录也使用 `save_dir`；地图文件仍受 `timestamp_prefix` 控制。
+- 重定位的输入路径仍由 `relocation.pcd_load_name` 决定；使用新目录中的地图时填入绝对路径，例如 `/home/robot/home/maps/<时间戳>_scans.pcd`。
 - 密集导出不增加在线匹配点数或关键帧频率，但会增加最终地图内存、文件大小及写入量；需重新编译并重新建图才能生效。
 
 ## 8. ROS 发布负载 `pub`

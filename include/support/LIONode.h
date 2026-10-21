@@ -130,6 +130,14 @@ private:
     void elevatorFlagCallback(const lio_ros::BoolConstPtr& msg);
     void initialPoseCallback(const lio_ros::PoseWithCovarianceStampedConstPtr& msg);
     void applyPendingInitialPose(double stamp);
+    void publishLocalizationStatus();
+    lio_ros::Publisher<lio_ros::String> localization_status_pub_;
+    std::uint64_t received_imu_count_ = 0, received_lidar_count_ = 0, published_pose_count_ = 0;
+    double last_imu_receive_wall_ = 0.0, last_lidar_receive_wall_ = 0.0, last_pose_publish_wall_ = 0.0;
+    double last_input_imu_stamp_ = 0.0, last_input_lidar_stamp_ = 0.0;
+    std::string initial_pose_event_ = "not_received";
+    std::string previous_localization_reason_;
+    unsigned int localization_status_ticks_ = 0;
 
     LidarPipeline lidar_pipeline_;
 #if LIO_ENABLE_LOOP_CLOSURE

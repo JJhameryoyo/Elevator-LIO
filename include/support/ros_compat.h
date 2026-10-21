@@ -38,6 +38,7 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/PointField.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/String.h>
 #include <lio/CustomMsg.h>
 #include <lio/ElevatorState.h>
 #include <lio/wheel_info.h>
@@ -58,6 +59,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <lio/msg/elevator_state.hpp>
 #include <lio/msg/wheel_info.hpp>
@@ -97,6 +99,7 @@ using PoseWithCovarianceStamped = geometry_msgs::PoseWithCovarianceStamped;
 using PoseWithCovarianceStampedConstPtr = geometry_msgs::PoseWithCovarianceStampedConstPtr;
 using TransformStamped = geometry_msgs::TransformStamped;
 using Bool = std_msgs::Bool;
+using String = std_msgs::String;
 using BoolConstPtr = std_msgs::BoolConstPtr;
 using CustomMsg = lio::CustomMsg;
 using CustomMsgConstPtr = lio::CustomMsgConstPtr;
@@ -122,6 +125,7 @@ using PoseWithCovarianceStamped = geometry_msgs::msg::PoseWithCovarianceStamped;
 using PoseWithCovarianceStampedConstPtr = PoseWithCovarianceStamped::ConstSharedPtr;
 using TransformStamped = geometry_msgs::msg::TransformStamped;
 using Bool = std_msgs::msg::Bool;
+using String = std_msgs::msg::String;
 using BoolConstPtr = Bool::ConstSharedPtr;
 using CustomMsg = livox_ros_driver2::msg::CustomMsg;
 using CustomMsgConstPtr = CustomMsg::ConstSharedPtr;
